@@ -1,5 +1,7 @@
 # 选择性 reference
 
+首次使用可先阅读[Reference 模式使用说明](reference-quickstart.md)，包含开启、按算子切换和原版对照命令。
+
 在 vLLM 0.24.0 的第一、二阶段 reference 路由上增加按算子选择功能。
 可保持其他算子严格 reference，单独让 Attention 使用 vLLM Triton；也可只对指定算子启用 reference。
 

@@ -1,5 +1,9 @@
 # Stage-one torch reference mode
 
+This document describes the first implementation stage. For current usage,
+see the [Reference mode guide](reference-quickstart.md) and
+[stage-two coverage](reference-mode-stage2.md).
+
 This opt-in mode routes audited composite operations to existing vLLM torch code,
 then to audited plugin torch code. It is independent of `VLLM_FL_PREFER`, which
 retains its original backend-preference semantics.
