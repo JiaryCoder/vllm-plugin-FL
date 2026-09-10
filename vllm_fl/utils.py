@@ -106,6 +106,9 @@ def get_device_control_env_var(vendor_name: str) -> str:
 
 
 def use_flaggems(default: bool = True) -> bool:
+    from vllm_fl.reference.engine import reference_requested
+    if reference_requested():
+        return False
     if os.environ.get("VLLM_FL_PREFER_ENABLED", "True").lower() not in ("true", "1"):
         return False
     prefer_backend = os.environ.get("VLLM_FL_PREFER", "").strip()
@@ -371,6 +374,13 @@ def is_oot_enabled() -> bool:
     Returns:
         True if OOT registration is enabled, False otherwise.
     """
+    # Selective reference uses saved upstream/vendor entries for excluded ops.
+    # Do not replace them with FlagGems-specific OOT classes or MoE routers.
+    from vllm_fl.reference.engine import reference_requested
+    if reference_requested():
+        from vllm_fl.reference.selection import selection_active
+        if selection_active():
+            return False
     if os.environ.get("VLLM_FL_PREFER_ENABLED", "True").lower() not in ("true", "1"):
         return False
     enabled_str = os.environ.get("VLLM_FL_OOT_ENABLED", "1")
