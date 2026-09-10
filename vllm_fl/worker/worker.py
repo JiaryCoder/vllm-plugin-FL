@@ -202,6 +202,10 @@ class WorkerFL(WorkerBase):
         is_driver_worker: bool = False,
     ):
 
+        from vllm_fl.reference.hooks import configure_reference
+        from vllm_fl.reference.engine import reference_requested
+        configure_reference(vllm_config)
+
         if (
             vllm_config.num_speculative_tokens == 1
             and vllm_config.scheduler_config.async_scheduling
@@ -243,7 +247,7 @@ class WorkerFL(WorkerBase):
 
         register_oot_ops()
 
-        if fl_envs.USE_FLAGGEMS:
+        if fl_envs.USE_FLAGGEMS and not reference_requested():
             import flag_gems
 
             # Get whitelist and blacklist from environment variables

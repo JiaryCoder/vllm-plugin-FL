@@ -1,44 +1,26 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
-
-"""
-Reference normalization operator implementations using PyTorch.
-"""
-
-from __future__ import annotations
-
+"""Torch fallback matching vLLM's FP32 RMSNorm intermediate semantics."""
 from typing import Optional, Union
-
 import torch
 
 
-def rms_norm_torch(
-    obj,
-    x: torch.Tensor,
-    residual: Optional[torch.Tensor] = None,
-) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-    """
-    RMS normalization using PyTorch.
-
-    Args:
-        x: Input tensor
-        residual: Optional residual tensor
-        obj: The calling obj (e.g., RMSNorm layer)
-
-    Returns:
-        Normalized tensor, or tuple of (normalized, residual) if residual is provided
-    """
-    # Get weight and epsilon from obj
-    weight = obj.weight
-    epsilon = obj.variance_epsilon
-
-    if residual is not None:
-        x = x + residual
-        residual = x
-
-    variance = x.pow(2).mean(-1, keepdim=True)
-    x = x * torch.rsqrt(variance + epsilon)
-    output = weight * x
-
-    if residual is not None:
-        return output, residual
-    return output
+def rms_norm_torch(obj, x: torch.Tensor, residual: Optional[torch.Tensor] = None
+                   ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    orig_dtype = x.dtype
+    has_residual = residual is not None
+    x = x.to(torch.float32)
+    if has_residual:
+        x = x + residual.to(torch.float32)
+        residual = x.to(orig_dtype)
+    variance_size = getattr(obj, "variance_size_override", None)
+    x_var = x if variance_size is None else x[..., :variance_size]
+    variance = x_var.pow(2).mean(-1, keepdim=True)
+    x = x * torch.rsqrt(variance + obj.variance_epsilon)
+    pass_weight = getattr(
+        obj, "pass_weight_add" if has_residual else "pass_weight",
+        getattr(obj, "has_weight", True),
+    )
+    if pass_weight:
+        x = x.to(obj.weight.dtype) * obj.weight
+    output = x.to(orig_dtype)
+    return (output, residual) if has_residual else output
