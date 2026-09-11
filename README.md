@@ -199,6 +199,11 @@ if __name__ == "__main__":
 
 ## Advanced use
 
+For PyTorch reference routing, operator selection, and switching back to stock
+vLLM on vLLM 0.24, see the [Reference mode guide](./docs/reference-quickstart.md).
+Standard in-tree native interfaces can be [discovered automatically](./docs/reference-dynamic-native.md)
+without adding each CustomOp class to a support list.
+
 For dispatch environment variable usage, see [environment variables usage](./vllm_fl/dispatch/README.md#environment-variables).
 
 ### Using Cuda Communication library

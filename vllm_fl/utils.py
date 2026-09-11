@@ -106,6 +106,9 @@ def get_device_control_env_var(vendor_name: str) -> str:
 
 
 def use_flaggems(default: bool = True) -> bool:
+    from vllm_fl.reference.engine import reference_requested
+    if reference_requested():
+        return False
     if os.environ.get("VLLM_FL_PREFER_ENABLED", "True").lower() not in ("true", "1"):
         return False
     prefer_backend = os.environ.get("VLLM_FL_PREFER", "").strip()
@@ -371,6 +374,11 @@ def is_oot_enabled() -> bool:
     Returns:
         True if OOT registration is enabled, False otherwise.
     """
+    # Native discovery requires the in-tree class and its constructor contract.
+    # Keep original classes in all reference modes, including include=all.
+    from vllm_fl.reference.engine import reference_requested
+    if reference_requested():
+        return False
     if os.environ.get("VLLM_FL_PREFER_ENABLED", "True").lower() not in ("true", "1"):
         return False
     enabled_str = os.environ.get("VLLM_FL_OOT_ENABLED", "1")
