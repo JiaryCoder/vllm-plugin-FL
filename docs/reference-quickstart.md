@@ -2,7 +2,8 @@
 
 本说明适用于已按 [README](../README.md#setup) 安装本分支插件、使用 vLLM 0.24.0 的环境。
 Reference 用于精度诊断：在已接入的算子入口，优先调用经过审核的 vLLM PyTorch 实现，
-缺少可用实现时调用插件补充的 PyTorch 实现。当前仍使用显式支持名单。
+缺少可用实现时调用插件补充的 PyTorch 实现。标准 CustomOp 和 IR 可以
+[动态复用 vLLM native 实现](reference-dynamic-native.md)，无需逐个添加类名；已有特殊适配仍保留。
 
 **所有开关在启动新服务前设置。修改后必须重启整个服务，不支持在已加载模型中热切换。**
 Reference 会关闭模型编译和 CUDA Graph，并阻止使用已激活的 FlagGems ATen 替换。
@@ -126,6 +127,7 @@ tail -n 20 "$VLLM_FL_REFERENCE_REPORT_DIR"/reference-*.jsonl
 | source | 含义 |
 | --- | --- |
 | `vllm.native` | 使用 vLLM 的 reference 候选，可能经过参数或布局适配 |
+| `vllm.native.dynamic` | 动态发现的 vLLM native 接口，不代表完整调用图已经审核 |
 | `plugin.torch` | 使用插件补充的 PyTorch 候选 |
 | `reference.setup` | 装载或布局初始化事件，不代表执行某个计算 kernel |
 | `user_override` | 按 INCLUDE/EXCLUDE 主动使用原实现 |
@@ -143,7 +145,7 @@ tail -n 20 "$VLLM_FL_REFERENCE_REPORT_DIR"/reference-*.jsonl
 严格和非严格模式都不会重试，避免重复修改缓存或原地张量。
 
 当前支持范围和已知限制见 [reference-mode-stage2.md](reference-mode-stage2.md)。
-未知 CustomOp、未接管的自由函数和任意直接 kernel 调用并不会自动获得 reference 支持。
+标准 vLLM CustomOp 可通过 native 接口自动接入；未接管的自由函数和任意直接 kernel 调用不会自动获得 reference 支持。
 “开启全部 reference”也不表示整个模型进程的每个调用都已被证明为纯 PyTorch。
 
 测试可在空闲设备上运行：

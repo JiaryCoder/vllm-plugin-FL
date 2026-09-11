@@ -37,6 +37,8 @@ def configure_reference(vllm_config):
         if selection_reason("ir." + op) is None:
             setattr(priorities, op, ["native"])
     install_reference_hooks()
+    from .guards import install_launch_guards
+    install_launch_guards()
     from .functions import install_function_hooks
     install_function_hooks()
 
@@ -57,6 +59,8 @@ def install_reference_hooks():
                 return
             original = self.forward
             identity = custom_identity(self)
+            from .selection import register_custom
+            register_custom(type(self))
 
             @functools.wraps(original)
             def routed(*a, **k):
@@ -73,9 +77,11 @@ def install_reference_hooks():
                     record_route(identity, "optimized_fallback", implementation,
                                  "no audited class/variant reference")
                     return result
+                from .native import custom_candidate
                 return run_reference(
                     identity, a, k,
-                    (lambda: upstream_custom(self), lambda: plugin_custom(self)),
+                    (lambda: upstream_custom(self), lambda: plugin_custom(self),
+                     lambda: custom_candidate(self)),
                     fallback,
                 )
 
@@ -106,26 +112,12 @@ def install_reference_hooks():
                 selected.impl_fn = invoke_selected
                 return selected
             def factory():
+                if self.name not in IR_OPS:
+                    from .native import ir_candidate
+                    return ir_candidate(self)
                 fn = native_ir(self.name)
                 return Candidate("vllm.native", f"vllm.ir.{self.name}.native",
                                  fn, tensor_support)
-            if self.name not in IR_OPS:
-                from vllm_fl.dispatch.policy import get_policy
-                reason = "IR op is outside the audited inventory"
-                if get_policy().strict:
-                    record_route("ir." + self.name, "unavailable", "", reason)
-                    raise ReferenceUnavailable(f"{self.name}: {reason}")
-                with optimized_fallback():
-                    impl = original_dispatch(self, *args, **kwargs)
-                fallback_impl = copy.copy(impl)
-                def invoke_fallback(*a, **k):
-                    with optimized_fallback():
-                        result = impl.impl_fn(*a, **k)
-                    record_route("ir." + self.name, "optimized_fallback",
-                                 impl.provider, reason)
-                    return result
-                fallback_impl.impl_fn = invoke_fallback
-                return fallback_impl
             # Copy instead of mutating the global provider shared with ordinary
             # inference. Functional/native also satisfies maybe_inplace's contract.
             template = self.impls.get("native")

@@ -374,13 +374,11 @@ def is_oot_enabled() -> bool:
     Returns:
         True if OOT registration is enabled, False otherwise.
     """
-    # Selective reference uses saved upstream/vendor entries for excluded ops.
-    # Do not replace them with FlagGems-specific OOT classes or MoE routers.
+    # Native discovery requires the in-tree class and its constructor contract.
+    # Keep original classes in all reference modes, including include=all.
     from vllm_fl.reference.engine import reference_requested
     if reference_requested():
-        from vllm_fl.reference.selection import selection_active
-        if selection_active():
-            return False
+        return False
     if os.environ.get("VLLM_FL_PREFER_ENABLED", "True").lower() not in ("true", "1"):
         return False
     enabled_str = os.environ.get("VLLM_FL_OOT_ENABLED", "1")

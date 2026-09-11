@@ -70,7 +70,7 @@ def test_yaml_completely_overrides_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("VLLM_FL_REFERENCE_EXCLUDE", "normalization")
     p = policy_from_env()
     set_global_policy(p)
-    assert p.reference_include == frozenset({"rms_norm", "gemma_rms_norm", "rms_norm_gated", "attention_backend"})
+    assert p.reference_include == frozenset({"rms_norm", "gemma_rms_norm", "rms_norm_gated", "attention_backend", "@group:normalization"})
     assert selection_reason("attention")
     assert selection_reason("rms_norm") is None
     assert selection_reason("chunk_gated_delta_rule")

@@ -60,6 +60,11 @@ def reference_enabled() -> bool:
     return reference_requested() and not _BYPASS.get()
 
 
+def reference_execution_active() -> bool:
+    """True only inside reference computation in this execution context."""
+    return bool(_REFERENCE_SCOPES.get()) and not _BYPASS.get()
+
+
 @contextlib.contextmanager
 def optimized_fallback():
     token = _BYPASS.set(True)
@@ -165,12 +170,26 @@ def aten_only():
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
             namespace = func._schema.name.split("::", 1)[0]
             if namespace not in {"aten", "prims"} and not _BYPASS.get():
+                from .native import ir_torch_entry
+                entry = ir_torch_entry(func)
+                if entry is not None:
+                    return entry(*args, **(kwargs or {}))
                 raise ReferencePurityError(
                     f"Reference attempted opaque operation {func._schema.name}"
                 )
+            if not _BYPASS.get() and func._schema.name.startswith((
+                "aten::_scaled_dot_product_flash_attention",
+                "aten::_scaled_dot_product_efficient_attention",
+                "aten::_scaled_dot_product_cudnn_attention",
+                "aten::_flash_attention_forward",
+            )):
+                raise ReferencePurityError(
+                    f"Reference attempted fused attention operation {func._schema.name}"
+                )
             return func(*args, **(kwargs or {}))
 
-    with AtenOnly():
+    from .guards import math_function_mode
+    with math_function_mode(), AtenOnly():
         yield
 
 

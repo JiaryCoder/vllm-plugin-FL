@@ -1,6 +1,7 @@
 # 选择性 reference
 
 首次使用可先阅读[Reference 模式使用说明](reference-quickstart.md)，包含开启、按算子切换和原版对照命令。
+标准 CustomOp/IR 可通过[动态 native 发现](reference-dynamic-native.md)接入；算子组也包含动态发现的类。
 
 在 vLLM 0.24.0 的第一、二阶段 reference 路由上增加按算子选择功能。
 可保持其他算子严格 reference，单独让 Attention 使用 vLLM Triton；也可只对指定算子启用 reference。
@@ -26,7 +27,7 @@ EXCLUDE 优先于 INCLUDE；有效 `VLLM_FL_CONFIG` YAML 完全覆盖相应环�
 对于 FL dispatch 入口，主动排除时仅允许 vendor 候选，仍遵守 vendor 黑白名单和 `op_backends` 限制；
 没有允许的 vendor 会报错，不能悄悄改用 FlagGems 或 reference。
 CustomOp/IR/函数入口回到其原平台方法或 provider，未必每个原方法都是融合 kernel，实际路径以记录为准。
-选择性 reference 会跳过 FlagGems OOT 算子/路由注册；reference 模式下也不启用 FlagGems ATen 替换。
+所有 reference 模式都会跳过 FlagGems OOT 算子/路由注册，也不启用 FlagGems ATen 替换。
 如果当前进程此前已启用 FlagGems ATen 替换，执行 reference 或主动排除入口都会拒绝，请重建进程。
 
 ## Attention 使用 vLLM Triton
@@ -121,6 +122,7 @@ MoE 权重装载与完整专家计算属于同一个选择单元，W8A8 Linear �
 每个 worker 的 JSONL 路由记录区分：
 
 - `vllm.native` / `plugin.torch`：实际 reference 候选。
+- `vllm.native.dynamic`：动态发现的 vLLM native 接口，见动态发现文档中的检查边界。
 - `reference.setup`：reference 所需的布局等初始化约定。
 - `user_override`：主动排除，记录实际原函数/provider/Attention 类及选择原因。
 - `user_override_error`：主动选择的实现执行失败，没有自动重试。

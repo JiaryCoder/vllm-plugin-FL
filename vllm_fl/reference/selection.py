@@ -6,6 +6,36 @@ not certify its implementation. Decisions apply to calls that reach a hook;
 inlined math inside a larger reference cannot be selected independently.
 """
 from functools import lru_cache
+import re
+
+
+_custom_groups = {}
+_CLASS_PATH = re.compile(r"vllm(?:\.[A-Za-z_][A-Za-z_0-9]*)+\Z")
+_IR_NAME = re.compile(r"[a-z_][a-z_0-9]*\Z")
+
+
+def _module_groups(path):
+    groups = set()
+    for prefix, group in (
+        ("vllm.model_executor.layers.activation.", "activation"),
+        ("vllm.model_executor.layers.layernorm.", "normalization"),
+        ("vllm.model_executor.layers.rotary_embedding.", "rope"),
+        ("vllm.model_executor.layers.fused_moe.", "moe"),
+        ("vllm.model_executor.layers.mamba.", "gdn"),
+        ("vllm.model_executor.layers.fla.", "gdn"),
+    ):
+        if path.startswith(prefix):
+            groups.add(group)
+    return groups
+
+
+def register_custom(cls):
+    """Classify encountered CustomOps lazily; classification does not admit code."""
+    identity = cls.__module__ + "." + cls.__qualname__
+    groups = {"custom"}
+    for base in cls.__mro__:
+        groups.update(_module_groups(base.__module__ + "." + base.__qualname__))
+    _custom_groups[identity] = frozenset(groups)
 
 
 @lru_cache(maxsize=1)
@@ -18,6 +48,9 @@ def inventory():
     aliases.update(CLASSES)
     aliases.update({name: aliases[target] for name, target in CUSTOM_ALIASES.items()})
     aliases.update({
+        # Compatibility names are selection aliases, not native admission rules.
+        BASE + "rotary_embedding.llama3_rope.Llama3RotaryEmbedding": "llama3_rope",
+        "Llama3RotaryEmbedding": "llama3_rope",
         "attention": "attention_backend",
         "ir.rms_norm": "rms_norm",
         "ir.fused_add_rms_norm": "rms_norm",
@@ -80,6 +113,7 @@ def inventory():
     names = set(aliases.values())
     aliases.update({name: name for name in names})
     groups = {
+        "custom": set(),
         "activation": {"silu_and_mul", "gelu_and_mul", "swigluoai_and_mul", "swiglustep_and_mul"},
         "normalization": {"rms_norm", "gemma_rms_norm", "rms_norm_gated"},
         "rope": {"rotary_embedding", "apply_rotary_emb", "mrope", "mrope_interleaved", "ernie45_mrope", "llama3_rope"},
@@ -112,10 +146,21 @@ def normalize_selectors(value, *, allow_none=False):
             raise ValueError("reference selectors must be strings")
         token = token.strip()
         include_all |= token == "all"
-        if token in groups:
+        if token.startswith("@group:") and token[7:] in groups:
+            result.add(token)
+        elif token in groups:
             result.update(groups[token])
+            result.add("@group:" + token)
         elif token in aliases:
             result.add(aliases[token])
+        elif token.startswith("custom:") or _CLASS_PATH.fullmatch(token):
+            path = token.removeprefix("custom:")
+            if not _CLASS_PATH.fullmatch(path):
+                raise ValueError("custom selector requires a fully qualified vllm class path")
+            result.add(aliases.get(path, path))
+        elif token.startswith("ir:") and _IR_NAME.fullmatch(token[3:]):
+            path = "ir." + token[3:]
+            result.add(aliases.get(path, path))
         else:
             raise ValueError(f"Unknown reference selector {token!r}; supported names: "
                              + ", ".join(sorted(set(aliases.values()) | set(groups))))
@@ -131,9 +176,13 @@ def selection_reason(op):
     from vllm_fl.dispatch.policy import get_policy
     policy = get_policy()
     name = canonical_name(op)
-    if name in policy.reference_exclude:
+    groups = _custom_groups.get(op, _module_groups(op))
+    def matches(selectors):
+        return (name in selectors or op in selectors or "@group:all" in selectors
+                or any("@group:" + group in selectors for group in groups))
+    if matches(policy.reference_exclude):
         return f"excluded from reference: {name}"
-    if policy.reference_include is not None and name not in policy.reference_include:
+    if policy.reference_include is not None and not matches(policy.reference_include):
         return f"outside reference include list: {name}"
     return None
 

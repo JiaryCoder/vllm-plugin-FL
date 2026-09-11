@@ -57,7 +57,7 @@ def test_long_position_forward_matches_vendor(dtype, neox, rotary_dim, with_key)
     atol = 2e-6 if dtype == torch.float32 else .02
     torch.testing.assert_close(actual, expected, rtol=atol, atol=atol)
     row = get_records()[-1]
-    assert row["source"] == "vllm.native"
+    assert row["source"] == "vllm.native.dynamic"
     assert row["op"].endswith("Llama3RotaryEmbedding")
     assert row["implementation"].endswith("base.RotaryEmbedding.forward_native")
 

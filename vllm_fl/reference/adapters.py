@@ -1,8 +1,8 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 """Audited candidates and thin calling-convention adapters for vLLM 0.24.
 
-The inventory is intentionally explicit. A method named forward_native is only
-a discovery candidate; unknown classes and wrappers around kernels are rejected.
+These entries retain established calling-convention and input checks. Other
+in-tree CustomOps are discovered through native.py, without adding class names.
 """
 from __future__ import annotations
 
@@ -179,6 +179,18 @@ def custom_spec(obj):
             f"{identity} has no audited class/variant reference"
         )
     return upstream, CUSTOM_CLASSES[upstream]
+
+
+def has_custom_adapter(obj):
+    """Existing adapter restrictions must not be bypassed by auto-discovery."""
+    from .custom import CLASSES
+    identity = custom_identity(obj)
+    return identity in CUSTOM_CLASSES or identity in CUSTOM_ALIASES or identity in CLASSES or identity in {
+        BASE + "fused_moe.router.grouped_topk_router.GroupedTopk",
+        BASE + "fused_moe.unquantized_fused_moe_method.UnquantizedFusedMoEMethod",
+        "vllm_fl.ops.fused_moe.layer.UnquantizedFusedMoEMethodFL",
+        BASE + "mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule",
+    }
 
 
 def upstream_custom(obj):

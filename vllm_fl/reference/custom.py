@@ -12,7 +12,6 @@ CLASSES = {
         "mrope_interleaved",
     BASE + "rotary_embedding.ernie45_vl_rope.Ernie4_5_VLRotaryEmbedding":
         "ernie45_mrope",
-    BASE + "rotary_embedding.llama3_rope.Llama3RotaryEmbedding": "llama3_rope",
 }
 
 
@@ -27,18 +26,6 @@ def upstream(obj):
     fn = load(module + ":" + cls + "." + method)
     implementation = path + "." + method
     expected_module = module
-    if op == "llama3_rope":
-        # This exact class only changes the torch inverse-frequency calculation.
-        # Its forward/cache accessors are the already audited base implementation.
-        # This does not certify arbitrary subclasses or other scaled RoPE types.
-        base = load(BASE + "rotary_embedding.base:RotaryEmbedding")
-        klass = load(module + ":" + cls)
-        for name in ("forward_native", "forward_static", "_match_cos_sin_cache_dtype"):
-            if getattr(klass, name) is not getattr(base, name):
-                from .engine import ReferenceUnavailable
-                raise ReferenceUnavailable(f"{path}.{name} no longer inherits the audited base")
-        expected_module = BASE + "rotary_embedding.base"
-        implementation = expected_module + ".RotaryEmbedding.forward_native"
     if fn.__module__ != expected_module:
         from .engine import ReferenceUnavailable
         raise ReferenceUnavailable(f"{path}.{method} was replaced")

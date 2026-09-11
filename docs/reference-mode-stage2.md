@@ -1,5 +1,8 @@
 # 第二阶段：复合算子与标准 Attention reference
 
+本文件记录第二阶段的适配与验证范围。当前还支持[动态发现 vLLM native 接口](reference-dynamic-native.md)，
+新类无需逐个登记；自动发现与已审核适配的来源标签和支持边界有所区别。
+
 后续已增加[选择性 reference](reference-selection.md)：通过 INCLUDE/EXCLUDE 主动选择算子；
 显式排除优先于下文的默认 reference 候选链，可单独使用 vLLM Triton Attention。
 
@@ -101,9 +104,10 @@ Attention 的不支持配置在后端选择、分配 KV cache 之前检查。
 - 卷积 APC 的按块快照、speculative convolution snapshots。
   GDN recurrent 的多 token 原地状态写入要求二维 slot table；
   无索引 recurrent 仅审查了 B=1 的非原地接口。
-- 老版 FL FLA CustomOp 的 `[K,V]` 状态布局及重复注册名字、
-  未列入清单的类/变体。不会把它们当作 vLLM 0.24 的 `[V,K]` 接口执行。
-- 第一阶段明确未审查的其他 RoPE/YaRN 等变体。
+- 老版 FL FLA CustomOp 的 `[K,V]` 状态布局及重复注册名字，或没有可用 native/适配器的类。
+  不会把它们当作 vLLM 0.24 的 `[V,K]` 接口执行。
+- 非标准入口或具有独立布局约定的 RoPE 变体仍需适配；标准 Linear/NTK/YaRN/Llama3
+  类的 native 接口可由动态机制发现，详见动态发现文档。
 
 严格性与 ATen 检查作用于**已经接入路由且审查过的入口**。
 调度器、采样器、通信、KV 元数据构建及任意直接 kernel 调用不因此自动成为 reference。

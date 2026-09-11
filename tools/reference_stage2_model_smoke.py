@@ -33,7 +33,7 @@ def main():
     os.environ["VLLM_FL_STRICT"] = "1"
     os.environ["VLLM_FL_PREFER"] = "vendor"
     os.environ["USE_FLAGGEMS"] = "0"
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1" if args.multiprocess else "0"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     report_dir = tempfile.mkdtemp(prefix=Path(args.output).stem + "-routes-",
