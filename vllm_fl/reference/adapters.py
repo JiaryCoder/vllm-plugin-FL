@@ -19,6 +19,8 @@ CUSTOM_CLASSES = {
     BASE + "rotary_embedding.base.RotaryEmbedding": "rotary_embedding",
     BASE + "rotary_embedding.common.ApplyRotaryEmb": "apply_rotary_emb",
     BASE + "rotary_embedding.mrope.MRotaryEmbedding": "mrope",
+    BASE + "rotary_embedding.deepseek_scaling_rope.DeepseekScalingRotaryEmbedding":
+        "deepseek_scaling_rope",
 }
 CUSTOM_ALIASES = {
     "vllm_fl.ops.activation.SiluAndMulFL": BASE + "activation.SiluAndMul",
@@ -215,6 +217,23 @@ def upstream_custom(obj):
     fn = klass.forward_native
     if getattr(fn, "__module__", "") != module:
         raise ReferenceUnavailable(f"{path}.forward_native was replaced")
+    if op == "deepseek_scaling_rope":
+        def run(positions, query, key=None, offsets=None):
+            # CUDA/FlashInfer initialization keeps the trigonometric cache in
+            # FP32. Calling forward_native on that same instance promotes Q/K
+            # to FP32, whereas forward_cuda preserves their input dtypes.
+            # MLA's cache writer interprets both inputs using the latent KV
+            # dtype; passing an FP32 K beside BF16 KV silently corrupts cache.
+            # Keep upstream Torch math and its FP32 cache, then restore the
+            # public output contract before crossing that kernel boundary.
+            q, k = fn(obj, positions, query, key, offsets)
+            return q.to(query.dtype), k.to(key.dtype)
+        def supports(positions, query, key=None, offsets=None):
+            if key is None:
+                return "DeepseekScalingRotaryEmbedding native requires key"
+            return tensor_support(obj, positions, query, key, offsets)
+        return Candidate("vllm.native", path + ".forward_native[dtype-adapted]",
+                         run, supports)
     def run(*args, **kwargs):
         return fn(obj, *args, **kwargs)
     def supports(*args, **kwargs):

@@ -116,7 +116,7 @@ def inventory():
         "custom": set(),
         "activation": {"silu_and_mul", "gelu_and_mul", "swigluoai_and_mul", "swiglustep_and_mul"},
         "normalization": {"rms_norm", "gemma_rms_norm", "rms_norm_gated"},
-        "rope": {"rotary_embedding", "apply_rotary_emb", "mrope", "mrope_interleaved", "ernie45_mrope", "llama3_rope"},
+        "rope": {"rotary_embedding", "apply_rotary_emb", "mrope", "mrope_interleaved", "ernie45_mrope", "llama3_rope", "deepseek_scaling_rope"},
         "moe": {"topk_softmax", "grouped_topk", "moe_align_block_size", "moe_sum",
                 "invoke_fused_moe_triton_kernel", "apply_moe_activation", "fused_experts"},
         "w8a8": {"w8a8_linear", "dynamic_per_token_quant_int8", "unpack_uint8b128_int32"},
