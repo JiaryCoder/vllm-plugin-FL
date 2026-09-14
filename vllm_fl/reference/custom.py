@@ -24,6 +24,9 @@ def upstream(obj):
     module, cls = path.rsplit(".", 1)
     method = "forward" if op == "mrope_interleaved" else "forward_native"
     fn = load(module + ":" + cls + "." + method)
+    if method == "forward_native":
+        from .lifecycle import require_native_state
+        require_native_state(obj)
     implementation = path + "." + method
     expected_module = module
     if fn.__module__ != expected_module:

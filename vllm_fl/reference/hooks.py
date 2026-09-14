@@ -48,12 +48,20 @@ def install_reference_hooks():
         return
     from vllm.model_executor.custom_op import CustomOp
     from vllm.ir.op import IrOp
+    from .lifecycle import install_native_lifecycle
+    install_native_lifecycle()
 
     if not getattr(CustomOp.__init__, "_fl_reference_hook", False):
         original_init = CustomOp.__init__
 
         @functools.wraps(original_init)
         def init(self, *args, **kwargs):
+            from .lifecycle import state_for
+            state = state_for(self)
+            if state is not None and state.native and kwargs.get("enforce_enable", False):
+                raise ReferenceUnavailable(
+                    f"{state.identity}: enforce_enable conflicts with native initialization"
+                )
             original_init(self, *args, **kwargs)
             if not reference_requested():
                 return
@@ -64,9 +72,16 @@ def install_reference_hooks():
 
             @functools.wraps(original)
             def routed(*a, **k):
+                from .lifecycle import invocation_scope
+                with invocation_scope(self):
+                    return invoke(*a, **k)
+
+            def invoke(*a, **k):
                 if not reference_enabled():
                     return original(*a, **k)
                 def fallback():
+                    from .lifecycle import require_fallback_state
+                    require_fallback_state(self)
                     with optimized_fallback():
                         result = original(*a, **k)
                     selected = (getattr(self, "_forward_method", original)

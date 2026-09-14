@@ -168,7 +168,8 @@ def test_generic_mrope_without_plugin_kernel(config, dtype, device, interleaved)
         tol = 3e-2 if dtype == torch.bfloat16 else 3e-3
         torch.testing.assert_close(qo,eq,rtol=tol,atol=tol)
         torch.testing.assert_close(ko,ek,rtol=tol,atol=tol)
-    routes = [r for r in get_records() if r["op"].endswith(".MRotaryEmbedding")]
+    routes = [r for r in get_records() if r["op"].endswith(".MRotaryEmbedding")
+              and r["source"] != "reference.setup"]
     assert routes and all(r["source"] == "vllm.native" for r in routes)
 
 

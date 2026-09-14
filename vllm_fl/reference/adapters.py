@@ -36,6 +36,12 @@ DISPATCH_OPS = {
     "invoke_fused_moe_triton_kernel", "attention_backend",
 }
 IR_OPS = {"rms_norm", "fused_add_rms_norm"}
+SPECIAL_CUSTOM_ADAPTERS = {
+    BASE + "fused_moe.router.grouped_topk_router.GroupedTopk",
+    BASE + "fused_moe.unquantized_fused_moe_method.UnquantizedFusedMoEMethod",
+    "vllm_fl.ops.fused_moe.layer.UnquantizedFusedMoEMethodFL",
+    BASE + "mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule",
+}
 
 
 def load(path):
@@ -187,12 +193,8 @@ def has_custom_adapter(obj):
     """Existing adapter restrictions must not be bypassed by auto-discovery."""
     from .custom import CLASSES
     identity = custom_identity(obj)
-    return identity in CUSTOM_CLASSES or identity in CUSTOM_ALIASES or identity in CLASSES or identity in {
-        BASE + "fused_moe.router.grouped_topk_router.GroupedTopk",
-        BASE + "fused_moe.unquantized_fused_moe_method.UnquantizedFusedMoEMethod",
-        "vllm_fl.ops.fused_moe.layer.UnquantizedFusedMoEMethodFL",
-        BASE + "mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule",
-    }
+    return (identity in CUSTOM_CLASSES or identity in CUSTOM_ALIASES
+            or identity in CLASSES or identity in SPECIAL_CUSTOM_ADAPTERS)
 
 
 def upstream_custom(obj):
@@ -205,6 +207,8 @@ def upstream_custom(obj):
         return candidate
     path, op = custom_spec(obj)
     if op in {"silu_and_mul", "gelu_and_mul", "rms_norm"}:
+        from .lifecycle import require_native_state
+        require_native_state(obj)
         candidate = upstream_dispatch(op)
         def run(*args, **kwargs):
             return candidate.fn(obj, *args, **kwargs)
@@ -217,29 +221,18 @@ def upstream_custom(obj):
     fn = klass.forward_native
     if getattr(fn, "__module__", "") != module:
         raise ReferenceUnavailable(f"{path}.forward_native was replaced")
-    if op == "deepseek_scaling_rope":
-        def run(positions, query, key=None, offsets=None):
-            # CUDA/FlashInfer initialization keeps the trigonometric cache in
-            # FP32. Calling forward_native on that same instance promotes Q/K
-            # to FP32, whereas forward_cuda preserves their input dtypes.
-            # MLA's cache writer interprets both inputs using the latent KV
-            # dtype; passing an FP32 K beside BF16 KV silently corrupts cache.
-            # Keep upstream Torch math and its FP32 cache, then restore the
-            # public output contract before crossing that kernel boundary.
-            q, k = fn(obj, positions, query, key, offsets)
-            return q.to(query.dtype), k.to(key.dtype)
-        def supports(positions, query, key=None, offsets=None):
-            if key is None:
-                return "DeepseekScalingRotaryEmbedding native requires key"
-            return tensor_support(obj, positions, query, key, offsets)
-        return Candidate("vllm.native", path + ".forward_native[dtype-adapted]",
-                         run, supports)
+    from .lifecycle import require_native_state
+    require_native_state(obj)
     def run(*args, **kwargs):
         return fn(obj, *args, **kwargs)
     def supports(*args, **kwargs):
         reason = tensor_support(*args, **kwargs)
         if reason:
             return reason
+        if op == "deepseek_scaling_rope":
+            key = args[2] if len(args) > 2 else kwargs.get("key")
+            if key is None:
+                return "DeepseekScalingRotaryEmbedding native requires key"
         if op == "mrope":
             if getattr(obj, "scaling_factor", None) is not None:
                 return "YaRN-scaled MRoPE is outside the stage-one audit"

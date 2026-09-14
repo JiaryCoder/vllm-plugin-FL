@@ -111,6 +111,11 @@ def discover_method(obj):
     # calling convention. Do not mistake it for the class's native interface.
     if "forward_native" in vars(obj):
         raise ReferenceUnavailable("instance forward_native replacement needs an adapter")
+    return discover_class(cls)
+
+
+def discover_class(cls):
+    """Inspect the interface before the subclass constructor runs."""
     descriptor = inspect.getattr_static(cls, "forward_native", None)
     fn = descriptor.__func__ if isinstance(descriptor, (staticmethod, classmethod)) else descriptor
     return _discover_method(cls, descriptor, inspect.getattr_static(cls, "forward", None),
@@ -124,6 +129,8 @@ def custom_candidate(obj):
         # after it has declared this particular call unsupported.
         return None
     entry = discover_method(obj)
+    from .lifecycle import require_native_state
+    require_native_state(obj)
     bound = entry.bind(obj)
     return Candidate("vllm.native.dynamic", entry.implementation, bound,
                      lambda *a, **k: tensor_support(obj, *a, **k))

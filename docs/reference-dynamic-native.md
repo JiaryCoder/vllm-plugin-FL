@@ -27,7 +27,7 @@ export VLLM_FL_REFERENCE_REPORT_DIR=/tmp/reference-dynamic-run01
 
 | 情况 | 行为 |
 | --- | --- |
-| 内置类提供标准 `forward_native` | 校验来源和方法接口后直接调用 |
+| 内置类提供标准 `forward_native` | 构造前选择 native 配置，校验初始化与方法接口后调用 |
 | 内置子类继承 native 方法 | 解析实际继承的方法，绑定当前对象 |
 | staticmethod / classmethod | 按描述符规则绑定，不重复传 self |
 | vLLM IR 有 native provider | 调用实际 native 函数，保留 functional / maybe_inplace 约定 |
@@ -41,6 +41,38 @@ export VLLM_FL_REFERENCE_REPORT_DIR=/tmp/reference-dynamic-run01
 发现按实际出现的类进行，不提前导入所有模型模块。
 方法解析按类、实际描述符和代码对象缓存；重新绑定 native 方法会重新检查。
 原有类名映射用于兼容选择名称或特殊适配，不再是新 CustomOp 必须加入的支持名单。
+
+## 自动保持初始化与执行一致
+
+用户只需配置 reference 环境变量，不需要填写 `CompilationConfig` 或 `-cc.custom_ops`。
+插件在实际 CustomOp 类的完整构造函数开始前，建立独立的 vLLM 配置视图，使用官方
+`custom_ops` 开关关闭该类注册名对应的优化实现，并保持 eager。构造函数中的 `enabled()`、
+缓存初始化和 forward 选择由同一个配置控制；执行时恢复同一配置视图。
+
+例如 DeepSeek RoPE 会自然得到 `use_flashinfer=False` 和 BF16 sin/cos 缓存，
+直接调用未修改的 vLLM `forward_native`。此前针对它的输出 dtype 转换补丁已移除。
+
+配置视图按实际类隔离，不改全局注册名：多个 RoPE 子类共享 `rotary_embedding` 时，
+只选择其中一个类不会把另一个被排除的类也初始化为 native。嵌套子算子独立应用自己的选择，
+退出构造、正常调用或异常路径都会恢复原配置。vLLM 0.24 的当前配置是进程全局变量，
+插件用可重入锁串行化这些配置作用域；该模式用于 eager 调试，不提供跨配置并行模型执行保证。
+
+已注册 OOT 类不会抢占被选中的标准 native 类。NVIDIA 上被排除的算子若落到
+`CustomOp.forward_oot` 的通用 native 转发桩，会使用真正的 `forward_cuda`，
+避免再次组合“优化初始化 + native 函数”。专有 OOT 实现不作这种替换。
+
+普通 native 接口由通用机制接入；GroupedTopk、完整 MoE、GDN 等已有专用适配继续使用
+各自的初始化和计算约定，不将它们包装优化 kernel 的 `forward_native` 当作朴素 Torch 实现。
+
+对于覆盖 `enabled`、强制启用、覆盖构造后 dispatch 等不遵循标准协议的类，
+插件不会宣称已完成 native 初始化；需要显式适配，否则严格模式报错。
+算子实例创建后改变 reference 选择会报错，必须新建 worker。
+
+非严格模式仍可在没有可用 native 时使用优化初始化及回落实现。
+如果对象已经按 native 初始化，之后才遇到不支持的输入，且没有可用的 Torch 适配，
+不会复用该对象去冒险调用优化 kernel；会明确要求在启动前排除该算子并新建 worker。
+这项限制避免把缓存或权重布局错误伪装成成功回落。任意外部 Python 代码直接改写对象状态，
+不在自动配置保证范围内。
 
 ## 动态选择
 
@@ -72,6 +104,7 @@ vllm.model_executor.layers.rotary_embedding.llama3_rope.Llama3RotaryEmbedding
 ```
 
 `vllm.native` 表示原有已审核的上游适配路径，`plugin.torch` 表示插件补充实现。
+`reference.setup` 记录 native 初始化及实际使用的 `custom_ops`；它不代表算子已经执行。
 
 执行中继续检查 ATen/prims 调用。只解包已注册 IR 的准确 torch overload 后接回 native，
 不会放行整个自定义 torch namespace。Reference 计算中的标准 Triton JIT、autotune、
@@ -92,7 +125,7 @@ heuristics 和 compiled-kernel 下标调用会被拦截。PyTorch 公共 SDPA �
 - 未接管的自由函数、仅有优化 kernel 的实现、采样器、通信和模型初始化，不会被自动重写。
 - native 自身执行失败仍会报错，不能承诺所有 vLLM 可运行的模型都具备完整 reference 路径。
 
-实现位于 `native.py`、`hooks.py`、`guards.py` 和 `selection.py`。
+实现位于 `native.py`、`lifecycle.py`、`hooks.py`、`guards.py` 和 `selection.py`。
 新增非标准路径时维护的是必要适配器，而非每个正常 native 类的名单。
 
 ## 验证

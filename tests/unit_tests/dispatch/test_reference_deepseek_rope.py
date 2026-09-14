@@ -1,4 +1,4 @@
-"""Regression: FP32 RoPE cache must not promote the MLA cache writer's K."""
+"""Regression: configure native construction before the MLA cache writer's K."""
 import pytest
 import torch
 
@@ -30,16 +30,15 @@ def rope(dtype, device, neox=True, rotary_dim=64):
         64, rotary_dim, 4096, 10000., neox, 40., dtype,
         mscale=0.707, mscale_all_dim=0.707,
     ).to(device)
-    # Reproduce CUDA/FlashInfer initialization even on a CPU test runner.
-    obj.use_flashinfer = True
-    obj.cos_sin_cache = obj._compute_cos_sin_cache().to(device)
+    assert not obj.use_flashinfer
+    assert obj.cos_sin_cache.dtype == dtype
     return obj
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("neox", [True, False])
 @pytest.mark.parametrize("rotary_dim", [32, 64])
-def test_fp32_cache_preserves_output_contract(dtype, neox, rotary_dim, monkeypatch):
+def test_native_initialization_preserves_output_contract(dtype, neox, rotary_dim, monkeypatch):
     obj = rope(dtype, "cpu", neox, rotary_dim)
     positions = torch.tensor([0, 4095, 4096, 32766])
     offsets = torch.ones_like(positions)
@@ -67,9 +66,12 @@ def test_fp32_cache_preserves_output_contract(dtype, neox, rotary_dim, monkeypat
         assert output.dtype == source.dtype
         assert output.shape == source.shape
         assert output.isfinite().all()
-        torch.testing.assert_close(output, expected(source))
+        # The actual native path performs its intermediate products in the
+        # input dtype; allow its rounding against the FP64 formula.
+        tolerance = 2e-6 if dtype == torch.float32 else .02
+        torch.testing.assert_close(output, expected(source), rtol=tolerance, atol=tolerance)
     torch.testing.assert_close((q, k, obj.cos_sin_cache), before, rtol=0, atol=0)
-    assert get_records()[-1]["implementation"].endswith("forward_native[dtype-adapted]")
+    assert get_records()[-1]["implementation"].endswith("forward_native")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA cache writer regression")
@@ -81,8 +83,8 @@ def test_mla_cache_writer_receives_correct_dtype(dtype):
     q = torch.randn(14, 8, 192, device="cuda", dtype=dtype)[..., 128:]
     k = torch.randn(14, 1, 576, device="cuda", dtype=dtype)[..., 512:]
     kv = torch.randn(14, 512, device="cuda", dtype=dtype)
-    # This is the pre-fix mismatch, using the exact installed vLLM method.
-    assert obj.forward_native(positions, q, k)[1].dtype == torch.float32
+    # Even a direct call of the unmodified upstream method now preserves dtype.
+    assert obj.forward_native(positions, q, k)[1].dtype == dtype
     qr, kr = obj(positions, q, k)
     cache = torch.zeros(2, 64, 576, device="cuda", dtype=dtype)
     slots = positions + 64
@@ -91,7 +93,22 @@ def test_mla_cache_writer_receives_correct_dtype(dtype):
     expected = torch.cat((kv, kr.squeeze(1)), -1)
     assert cache[1, :14].isfinite().all()
     torch.testing.assert_close(cache[1, :14], expected, rtol=0, atol=0)
-    vendor = obj.forward_cuda(positions, q.clone(), k.clone())
+    from vllm_fl.reference.engine import optimized_fallback
+    from vllm.config.compilation import CompilationMode
+    # Build the vendor comparison under its own initialization configuration.
+    cfg = VllmConfig()
+    cfg.compilation_config.mode = CompilationMode.NONE
+    cfg.compilation_config.custom_ops = ["all"]
+    set_global_policy(SelectionPolicy(strict=True, reference_exclude="rope"))
+    with set_current_vllm_config(cfg):
+        vendor_obj = DeepseekScalingRotaryEmbedding(
+            64, 64, 4096, 10000., True, 40., dtype,
+            mscale=0.707, mscale_all_dim=0.707,
+        ).to("cuda")
+    assert vendor_obj.use_flashinfer
+    assert vendor_obj.cos_sin_cache.dtype == torch.float32
+    with optimized_fallback():
+        vendor = vendor_obj.forward_cuda(positions, q.clone(), k.clone())
     torch.testing.assert_close((qr, kr), vendor, rtol=.02, atol=.02)
 
 
@@ -101,6 +118,9 @@ def test_missing_key_and_selection():
     with pytest.raises(ReferenceUnavailable, match="requires key"):
         obj(pos, q)
     set_global_policy(SelectionPolicy(strict=True, reference_exclude="rope"))
+    with pytest.raises(ReferenceUnavailable, match="changed after construction"):
+        obj(pos, q, q)
+    obj = DeepseekScalingRotaryEmbedding(64, 64, 16, 10000., True, 2., torch.float32)
     obj._forward_method = lambda *a: "vendor"
     assert obj(pos, q, q) == "vendor"
     assert get_records()[-1]["source"] == "user_override"

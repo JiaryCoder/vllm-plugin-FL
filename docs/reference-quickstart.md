@@ -7,6 +7,9 @@ Reference 用于精度诊断：在已接入的算子入口，优先调用经过�
 
 **所有开关在启动新服务前设置。修改后必须重启整个服务，不支持在已加载模型中热切换。**
 Reference 会关闭模型编译和 CUDA Graph，并阻止使用已激活的 FlagGems ATen 替换。
+对自动接入的标准 CustomOp，插件在构造前设置 native 所需的内部配置，初始化和 forward
+使用同一配置。用户无需额外配置 `CompilationConfig`；不能在已创建的算子实例上热切换。
+已有 MoE/GDN 等专用适配仍按各自协议运行，详见动态 native 文档。
 
 ## 1. 开启 reference，保留 vLLM Triton Attention
 

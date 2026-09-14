@@ -110,6 +110,9 @@ def test_discovered_class_group_selection_before_construction(monkeypatch):
     assert obj(torch.zeros(1, dtype=torch.long), torch.ones(1, 16)) == "original"
     assert get_records()[-1]["source"] == "user_override"
     set_global_policy(SelectionPolicy(strict=True, reference_include="rope"))
+    with pytest.raises(ReferenceUnavailable, match="changed after construction"):
+        obj(torch.zeros(1, dtype=torch.long), torch.ones(1, 16))
+    obj = _rope("linear", torch.float32)
     obj(torch.zeros(1, dtype=torch.long), torch.ones(1, 16))
     assert get_records()[-1]["source"] == "vllm.native.dynamic"
 
@@ -125,6 +128,9 @@ def test_new_activation_group_and_qualified_selectors(monkeypatch):
     obj(x)
     assert get_records()[-1]["source"] == "vllm.native.dynamic"
     set_global_policy(SelectionPolicy(strict=True, reference_exclude=path))
+    with pytest.raises(ReferenceUnavailable, match="changed after construction"):
+        obj(x)
+    obj = activation.NewGELU()
     monkeypatch.setattr(obj, "_forward_method", lambda x: x + 9)
     torch.testing.assert_close(obj(x), x + 9)
     assert get_records()[-1]["source"] == "user_override"

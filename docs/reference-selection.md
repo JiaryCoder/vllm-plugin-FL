@@ -129,6 +129,11 @@ MoE 权重装载与完整专家计算属于同一个选择单元，W8A8 Linear �
 - `reference.mixed`：某个 reference 父调用内实际发生了显式优化子调用，不能将父调用整体视为纯 torch。
 - `optimized_fallback`：reference 不可用时的非严格回退，与主动排除分开。
 
+标准 native CustomOp 的初始化选择也由上述环境变量自动控制，用户无需填写
+`CompilationConfig`。按实际类隔离配置，处理共享注册名；构造后改变选择会报错并要求重建 worker。
+非严格回落只在初始化兼容时执行：没有 native 的算子可按优化路径构造并回落；
+已按 native 构造、运行时才发现不支持输入的算子，不会在相同状态上盲目改跑 vendor。
+
 Attention 的记录应包含：
 
 ```text
