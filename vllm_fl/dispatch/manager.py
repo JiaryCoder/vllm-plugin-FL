@@ -409,6 +409,9 @@ class OpManager:
         Raises:
             RuntimeError: If no implementation found
         """
+        from vllm_fl.reference.engine import reference_requested
+        if reference_requested():
+            return lambda *args, **kwargs: self.call(op_name, *args, **kwargs)
         return self._resolve_impl(op_name).fn
 
     def resolve_candidates(self, op_name: str) -> list[OpImpl]:
@@ -528,6 +531,13 @@ class OpManager:
             RuntimeError: If all implementations fail (fallback mode) or
                          if the primary implementation fails (strict mode)
         """
+        from vllm_fl.reference.engine import reference_enabled, reference_requested
+        if reference_requested():
+            from vllm_fl.reference.dispatch import call_dispatch, call_optimized
+            if reference_enabled():
+                return call_dispatch(self, op_name, args, kwargs)
+            return call_optimized(self, op_name, args, kwargs)
+
         enable_fallback = not get_policy().strict
 
         if not enable_fallback:
@@ -609,6 +619,12 @@ class OpManager:
         Returns:
             Implementation ID string
         """
+        from vllm_fl.reference.engine import get_records, reference_requested
+        if reference_requested():
+            for record in reversed(get_records()):
+                if record["op"] == op_name:
+                    return record["implementation"] or "reference.unavailable"
+            return "reference.auto"  # Input-dependent; inspect records after execution.
         return self._resolve_impl(op_name).impl_id
 
 

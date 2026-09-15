@@ -174,6 +174,8 @@ class PlatformFL(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm_fl.reference.hooks import configure_reference
+        configure_reference(vllm_config)
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
@@ -273,7 +275,17 @@ class PlatformFL(Platform):
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
 
-        backend_path = call_op("attention_backend", use_mla=use_mla, use_sparse=use_sparse)
+        from vllm_fl.reference.engine import reference_enabled
+        if reference_enabled():
+            from vllm_fl.reference.attention import select_backend
+            backend_path = select_backend(
+                attn_selector_config,
+                lambda: call_op("attention_backend", use_mla=use_mla, use_sparse=use_sparse),
+                selected_backend=selected_backend,
+                num_heads=num_heads,
+            )
+        else:
+            backend_path = call_op("attention_backend", use_mla=use_mla, use_sparse=use_sparse)
 
         logger.info_once(
             "Using attention backend via dispatch (use_mla=%s, use_sparse=%s): %s",

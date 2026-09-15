@@ -97,7 +97,8 @@ def w8a8_linear_reference(
     x_q, x_scale = dynamic_per_token_quant_int8(x_2d)
     x_q_2d = x_q.reshape(-1, x_q.shape[-1]).to(torch.int32)
     channel_scale = _normalize_channel_scale(weight_scale, weight.shape[0])
-    accumulator = x_q_2d @ weight.to(torch.int32).t()
+    from vllm_fl.reference.w8a8 import integer_mm
+    accumulator = integer_mm(x_q_2d, weight.to(torch.int32).t())
     output = accumulator.to(torch.float32)
     output = output * x_scale.reshape(-1, 1) * channel_scale
     if bias is not None:

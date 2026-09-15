@@ -1,92 +1,40 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
-
-"""
-Reference rotary embedding operator implementations using PyTorch.
-"""
-
-from __future__ import annotations
-
+"""Functional torch rotary fallback for the FL normalized interface."""
 import torch
 
 
 def rotary_embedding_torch(
-    obj,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    position_ids: torch.Tensor,
-    rotary_interleaved: bool = False,
-    inplace: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply rotary position embedding using PyTorch.
-
-    Args:
-        obj: The calling obj (for interface consistency)
-        query: Query tensor [batch, num_heads, seq_len, head_dim] or [seq_len, num_heads, head_dim]
-        key: Key tensor [batch, num_heads, seq_len, head_dim] or [seq_len, num_heads, head_dim]
-        cos: Cosine cache [max_seq_len, rotary_dim] where rotary_dim = head_dim or head_dim // 2
-        sin: Sine cache [max_seq_len, rotary_dim] where rotary_dim = head_dim or head_dim // 2
-        position_ids: Position indices [batch, seq_len] or [seq_len]
-        rotary_interleaved: Whether to use interleaved rotary
-        inplace: Whether to modify tensors in-place (ignored in reference impl)
-
-    Returns:
-        Tuple of (embedded_query, embedded_key)
-    """
-    # Get cos/sin for the positions
-    # position_ids can be [batch, seq_len] or [seq_len]
-    if position_ids.dim() == 1:
-        # [seq_len] -> [seq_len, rotary_dim]
-        cos_selected = cos[position_ids]
-        sin_selected = sin[position_ids]
-    else:
-        # [batch, seq_len] -> [batch, seq_len, rotary_dim]
-        cos_selected = cos[position_ids]
-        sin_selected = sin[position_ids]
-
-    # Expand dimensions to match query/key shape
-    # query/key: [batch, num_heads, seq_len, head_dim] or [seq_len, num_heads, head_dim]
-    if query.dim() == 4:
-        # [batch, num_heads, seq_len, head_dim]
-        # cos_selected: [batch, seq_len, rotary_dim] -> [batch, 1, seq_len, rotary_dim]
+    obj, query: torch.Tensor, key: torch.Tensor | None,
+    cos: torch.Tensor, sin: torch.Tensor, position_ids: torch.Tensor,
+    rotary_interleaved: bool = False, inplace: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    cos_selected = cos[position_ids]
+    sin_selected = sin[position_ids]
+    if query.ndim == 4 and position_ids.ndim == 1:
+        cos_selected = cos_selected.unsqueeze(0).unsqueeze(0)
+        sin_selected = sin_selected.unsqueeze(0).unsqueeze(0)
+    elif query.ndim in (3, 4):
         cos_selected = cos_selected.unsqueeze(1)
         sin_selected = sin_selected.unsqueeze(1)
-    elif query.dim() == 3:
-        # [seq_len, num_heads, head_dim]
-        # cos_selected: [seq_len, rotary_dim] -> [seq_len, 1, rotary_dim]
-        cos_selected = cos_selected.unsqueeze(1)
-        sin_selected = sin_selected.unsqueeze(1)
+    width = query.shape[-1]
+    if cos_selected.shape[-1] * 2 == width:
+        if rotary_interleaved:
+            cos_selected = cos_selected.repeat_interleave(2, dim=-1)
+            sin_selected = sin_selected.repeat_interleave(2, dim=-1)
+        else:
+            cos_selected = torch.cat((cos_selected, cos_selected), dim=-1)
+            sin_selected = torch.cat((sin_selected, sin_selected), dim=-1)
+    elif cos_selected.shape[-1] != width:
+        raise ValueError("rotary cache width must be rotary_dim or rotary_dim / 2")
 
-    # Check if we need to repeat cos/sin to match head_dim
-    rotary_dim = cos_selected.shape[-1]
-    head_dim = query.shape[-1]
+    def apply(x):
+        if x is None:
+            return None
+        if rotary_interleaved:
+            rotated = torch.stack((-x[..., 1::2], x[..., ::2]), dim=-1).flatten(-2)
+        else:
+            x1, x2 = x.chunk(2, dim=-1)
+            rotated = torch.cat((-x2, x1), dim=-1)
+        return x * cos_selected + rotated * sin_selected
 
-    if rotary_dim != head_dim:
-        # cos/sin only covers half of head_dim, need to repeat
-        # This handles the case where rotary is only applied to part of the dimensions
-        cos_selected = torch.cat([cos_selected, cos_selected], dim=-1)
-        sin_selected = torch.cat([sin_selected, sin_selected], dim=-1)
-
-    def rotate_half(x):
-        """Rotates half the hidden dims of the input."""
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
-
-    if rotary_interleaved:
-        # Interleaved rotary
-        def rotate_interleaved(x):
-            x1 = x[..., ::2]
-            x2 = x[..., 1::2]
-            return torch.stack((-x2, x1), dim=-1).flatten(-2)
-
-        q_embed = (query * cos_selected) + (rotate_interleaved(query) * sin_selected)
-        k_embed = (key * cos_selected) + (rotate_interleaved(key) * sin_selected)
-    else:
-        # Standard rotary (neox style)
-        q_embed = (query * cos_selected) + (rotate_half(query) * sin_selected)
-        k_embed = (key * cos_selected) + (rotate_half(key) * sin_selected)
-
-    return q_embed, k_embed
+    return apply(query), apply(key)

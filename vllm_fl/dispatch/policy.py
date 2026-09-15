@@ -43,6 +43,8 @@ class SelectionPolicy:
         per_op_order: Per-operator custom selection order
         deny_vendors: Set of vendor names to deny
         allow_vendors: Set of vendor names to allow (whitelist)
+        reference_include: Logical reference names/groups to include; None means all
+        reference_exclude: Logical names/groups to run through original vendor paths
     """
 
     prefer: str = PREFER_DEFAULT
@@ -50,8 +52,15 @@ class SelectionPolicy:
     per_op_order: Tuple[Tuple[str, Tuple[str, ...]], ...] = field(default_factory=tuple)
     deny_vendors: FrozenSet[str] = field(default_factory=frozenset)
     allow_vendors: Optional[FrozenSet[str]] = None
+    reference_include: Optional[FrozenSet[str]] = None
+    reference_exclude: FrozenSet[str] = field(default_factory=frozenset)
 
     def __post_init__(self):
+        from vllm_fl.reference.selection import normalize_selectors
+        object.__setattr__(self, "reference_include",
+                           normalize_selectors(self.reference_include, allow_none=True))
+        object.__setattr__(self, "reference_exclude",
+                           normalize_selectors(self.reference_exclude))
         if self.prefer not in VALID_PREFER_VALUES:
             raise ValueError(
                 f"Invalid prefer value: '{self.prefer}'. "
@@ -66,6 +75,8 @@ class SelectionPolicy:
         per_op_order: Optional[Dict[str, List[str]]] = None,
         deny_vendors: Optional[Set[str]] = None,
         allow_vendors: Optional[Set[str]] = None,
+        reference_include=None,
+        reference_exclude=None,
     ) -> "SelectionPolicy":
         """Create a SelectionPolicy from dictionary-like arguments."""
         per_op_tuple = tuple()
@@ -78,6 +89,8 @@ class SelectionPolicy:
             per_op_order=per_op_tuple,
             deny_vendors=frozenset(deny_vendors) if deny_vendors else frozenset(),
             allow_vendors=frozenset(allow_vendors) if allow_vendors else None,
+            reference_include=reference_include,
+            reference_exclude=reference_exclude,
         )
 
     @property
@@ -114,6 +127,8 @@ class SelectionPolicy:
         parts = [
             f"prefer={self.prefer}",
             f"st={int(self.strict)}",
+            "ref_include=" + ("*" if self.reference_include is None else ",".join(sorted(self.reference_include))),
+            "ref_exclude=" + ",".join(sorted(self.reference_exclude)),
         ]
 
         if self.allow_vendors:
@@ -136,6 +151,8 @@ class SelectionPolicy:
                 self.per_op_order,
                 self.deny_vendors,
                 self.allow_vendors,
+                self.reference_include,
+                self.reference_exclude,
             )
         )
 
@@ -360,6 +377,8 @@ class PolicyManager:
             per_op_order=per_op_order,
             deny_vendors=deny_vendors,
             allow_vendors=allow_vendors,
+            reference_include=config.get("reference_include"),
+            reference_exclude=config.get("reference_exclude"),
         )
 
     @staticmethod
@@ -390,6 +409,8 @@ class PolicyManager:
         - VLLM_FL_DENY_VENDORS: Comma-separated list of denied vendors
         - VLLM_FL_ALLOW_VENDORS: Comma-separated list of allowed vendors
         - VLLM_FL_PER_OP: Per-op order (format: op1=a|b|c;op2=x|y)
+        - VLLM_FL_REFERENCE_INCLUDE: Optional comma-separated logical names/groups
+        - VLLM_FL_REFERENCE_EXCLUDE: Comma-separated names/groups to bypass reference
         """
         # Priority 1: Check for user-specified config file (complete override)
         config_path = os.environ.get("VLLM_FL_CONFIG", "").strip()
@@ -467,6 +488,14 @@ class PolicyManager:
             per_op_order=per_op_order,
             deny_vendors=deny_vendors,
             allow_vendors=allow_vendors,
+            reference_include=os.environ.get(
+                "VLLM_FL_REFERENCE_INCLUDE",
+                platform_policy.reference_include if platform_policy else None,
+            ),
+            reference_exclude=os.environ.get(
+                "VLLM_FL_REFERENCE_EXCLUDE",
+                platform_policy.reference_exclude if platform_policy else None,
+            ),
         )
 
 
@@ -597,6 +626,8 @@ def with_strict_mode() -> _PolicyContext:
         per_op_order={k: list(v) for k, v in current.per_op_order},
         deny_vendors=set(current.deny_vendors),
         allow_vendors=set(current.allow_vendors) if current.allow_vendors else None,
+        reference_include=current.reference_include,
+        reference_exclude=current.reference_exclude,
     )
     return policy_context(strict_policy)
 
@@ -620,6 +651,8 @@ def with_preference(prefer: str) -> _PolicyContext:
         per_op_order={k: list(v) for k, v in current.per_op_order},
         deny_vendors=set(current.deny_vendors),
         allow_vendors=set(current.allow_vendors) if current.allow_vendors else None,
+        reference_include=current.reference_include,
+        reference_exclude=current.reference_exclude,
     )
     return policy_context(policy)
 
@@ -633,6 +666,8 @@ def with_allowed_vendors(*vendors: str) -> _PolicyContext:
         per_op_order={k: list(v) for k, v in current.per_op_order},
         deny_vendors=set(current.deny_vendors),
         allow_vendors=set(vendors),
+        reference_include=current.reference_include,
+        reference_exclude=current.reference_exclude,
     )
     return policy_context(policy)
 
@@ -648,5 +683,7 @@ def with_denied_vendors(*vendors: str) -> _PolicyContext:
         per_op_order={k: list(v) for k, v in current.per_op_order},
         deny_vendors=denied,
         allow_vendors=set(current.allow_vendors) if current.allow_vendors else None,
+        reference_include=current.reference_include,
+        reference_exclude=current.reference_exclude,
     )
     return policy_context(policy)
