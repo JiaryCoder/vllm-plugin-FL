@@ -155,6 +155,13 @@ class MacaBackend(Backend):
         if use_mla:
             if use_sparse:
                 return AttentionBackendEnum.FLASHMLA_SPARSE.get_path()
+            from .mla_compat import dense_mla_backend_path, register_mla_prefill
+            backend_path = dense_mla_backend_path()
+            register_mla_prefill(backend_path)
+            register_backend(
+                AttentionBackendEnum.FLASHMLA,
+                class_path=backend_path,
+            )
             return AttentionBackendEnum.FLASHMLA.get_path()
 
         # Default to FLASH_ATTN
