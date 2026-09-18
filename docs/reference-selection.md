@@ -24,8 +24,10 @@ EXCLUDE 优先于 INCLUDE；有效 `VLLM_FL_CONFIG` YAML 完全覆盖相应环�
 被排除的入口主动使用保存的原平台实现，不受 reference 的缺失检查影响；执行失败直接抛出，不重试。
 这不会关闭其他入口的 `VLLM_FL_STRICT=1` 检查。
 
-对于 FL dispatch 入口，主动排除时仅允许 vendor 候选，仍遵守 vendor 黑白名单和 `op_backends` 限制；
+对于 FL dispatch 入口，主动排除时默认仅允许 vendor 候选，仍遵守 vendor 黑白名单和 `op_backends` 限制；
 没有允许的 vendor 会报错，不能悄悄改用 FlagGems 或 reference。
+Attention 是可显式配置的例外：同时排除 `attention` 并设置其 per-op 后端时，允许指定的非 reference
+候选，包括 `flagos`。这不放宽其他复合算子的 vendor 限制，也不启用 FlagGems ATen 替换。
 CustomOp/IR/函数入口回到其原平台方法或 provider，未必每个原方法都是融合 kernel，实际路径以记录为准。
 所有 reference 模式都会跳过 FlagGems OOT 算子/路由注册，也不启用 FlagGems ATen 替换。
 如果当前进程此前已启用 FlagGems ATen 替换，执行 reference 或主动排除入口都会拒绝，请重建进程。
@@ -62,10 +64,42 @@ env -u VLLM_FL_CONFIG -u VLLM_FL_PER_OP -u VLLM_FL_REFERENCE_INCLUDE \
 ```
 
 `VLLM_PLUGINS=fl` 加载我们实现的 reference 路由，不代表启用 FlagGems kernel。
-Attention 调用 vLLM 的 CUDA backend selector，并校验指定后端的 dtype、head size、KV cache 等配置。
+CUDA 上 Attention 调用 vLLM 的 CUDA backend selector；其他平台通过已安装 vLLM 的 backend registry
+解析显式选择，并保留厂商注册的 backend。两种路径均调用实际 backend 的 `validate_configuration`，
+检查 dtype、head size、KV cache、MLA、设备能力等配置。
 不支持指定后端时明确失败，不替换成另一种 Attention。指定 `--attention-backend` 时必须把 Attention 排除出 reference，
 避免显式参数被静默忽略。不指定该参数则由 vLLM 在 CUDA 上自动选择。
-这一显式后端选择在 NVIDIA 上验证，其他厂商不能直接套用 `TRITON_ATTN` 示例。
+显式选择不再限制为 NVIDIA。实际可用的 backend 仍由当前镜像的实现、依赖和硬件决定；
+不能据此认为所有平台都支持 FlashAttention、FlashInfer 或 Triton。
+
+海光 reference 使用 vLLM Triton 的核心配置为：
+
+```bash
+export GEMS_VENDOR=hygon
+export VLLM_PLUGINS=fl
+export USE_FLAGGEMS=0
+export VLLM_FL_REFERENCE_MODE=1
+export VLLM_FL_PREFER=vendor
+export VLLM_FL_STRICT=1
+export VLLM_FL_REFERENCE_EXCLUDE=attention
+unset VLLM_FL_CONFIG VLLM_FL_OP_CONFIG VLLM_FL_PER_OP VLLM_FL_REFERENCE_INCLUDE
+# 在原有 vllm serve 命令后增加：
+# --attention-backend TRITON_ATTN
+```
+
+也可以使用 FL 的 per-op 选择（此方式不再同时传 `--attention-backend`）：
+
+```bash
+export VLLM_FL_REFERENCE_EXCLUDE=attention
+export VLLM_FL_PER_OP='attention_backend=flagos'
+export VLLM_FL_USE_FLAGGEMS_ATTN=0
+# 当前 default.flagos 选择器在此配置下返回 vLLM 的 TritonAttentionBackend。
+```
+
+两种选择都会记录实际 backend 类和 `user_override`。显式选择执行失败或能力校验失败时直接报错，
+即使 `VLLM_FL_STRICT=0` 也不在执行后自动重试另一种 Attention。
+恢复纯 Torch Attention 时，清除 Attention 的排除项并删除 `--attention-backend`；
+保持默认未设置 INCLUDE/EXCLUDE 即可让 Attention 与其余已接管算子一起走 reference。
 
 Attention 在 KV cache 分配之前选定；MoE/W8A8 的选择也涉及权重装载和布局。
 **所有选择配置在启动时确定，修改后要重启整个服务，不能在已加载模型中热切换。**

@@ -250,14 +250,27 @@ def test_active_flaggems_is_rejected_even_when_all_reference_is_excluded(monkeyp
         run_reference("rms_norm", (), {}, (), lambda: pytest.fail("optimized execution"))
 
 
-@pytest.mark.parametrize("kwargs", [{"deny_vendors": {"cuda"}},
-                                    {"per_op_order": {"attention_backend": ["flagos"]}}])
-def test_attention_override_obeys_vendor_restrictions(config, kwargs):
+def test_attention_override_obeys_vendor_restrictions(config):
+    from vllm_fl.platform import PlatformFL
+    from vllm.platforms import current_platform
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    vendor = getattr(current_platform, "vendor_name", current_platform.device_name)
+    vendor = {"nvidia": "cuda", "mthreads": "musa"}.get(vendor, vendor)
+    set_global_policy(SelectionPolicy(reference_exclude="attention", deny_vendors={vendor}))
+    with pytest.raises(ReferenceUnavailable, match="denied"):
+        PlatformFL.get_attn_backend_cls(AttentionBackendEnum.TRITON_ATTN,
+                                      AttentionSelectorConfig(128, torch.bfloat16, "auto", None))
+
+
+def test_explicit_attention_and_conflicting_dispatch_order_fail(config):
     from vllm_fl.platform import PlatformFL
     from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
-    set_global_policy(SelectionPolicy.from_dict(reference_exclude="attention", **kwargs))
-    with pytest.raises(ReferenceUnavailable, match="CUDA"):
+    set_global_policy(SelectionPolicy.from_dict(
+        reference_exclude="attention", per_op_order={"attention_backend": ["flagos"]},
+    ))
+    with pytest.raises(ReferenceUnavailable, match="conflicting selectors"):
         PlatformFL.get_attn_backend_cls(AttentionBackendEnum.TRITON_ATTN,
                                       AttentionSelectorConfig(128, torch.bfloat16, "auto", None))
 
@@ -293,6 +306,104 @@ def test_explicit_backend_requires_exclusion(config):
     with pytest.raises(ValueError, match="REFERENCE_EXCLUDE"):
         PlatformFL.get_attn_backend_cls(AttentionBackendEnum.TRITON_ATTN,
                                       AttentionSelectorConfig(128, torch.bfloat16, "auto", None))
+
+
+def attention_manager(monkeypatch, fn):
+    from vllm_fl.dispatch import manager as module
+    manager = OpManager()
+    manager._state.initialized = True
+    manager._state.init_pid = os.getpid()
+    manager.registry.register_many([
+        OpImpl("attention_backend", "default.flagos", BackendImplKind.DEFAULT, fn),
+        OpImpl("attention_backend", "vendor.mock", BackendImplKind.VENDOR,
+               lambda **kw: pytest.fail("must not try another backend"), vendor="mock"),
+    ])
+    monkeypatch.setattr(module, "_default_manager", manager)
+    return manager
+
+
+@pytest.mark.parametrize("is_cuda", [True, False])
+def test_explicit_attention_dispatch_works_on_each_platform(config, monkeypatch, is_cuda):
+    from vllm.platforms import current_platform
+    from vllm_fl.platform import PlatformFL
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm_fl.reference.engine import reference_enabled
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    path = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+    attention_manager(monkeypatch, lambda **kw: path)
+    set_global_policy(SelectionPolicy.from_dict(
+        strict=True, reference_exclude="attention",
+        per_op_order={"attention_backend": ["flagos"]},
+    ))
+    assert PlatformFL.get_attn_backend_cls(
+        None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
+    ) == path
+    assert get_records()[-1]["implementation"] == path
+    assert {r["source"] for r in get_records()} == {"user_override"}
+    assert reference_enabled()
+    with pytest.raises(ReferenceUnavailable):
+        run_reference("unreviewed", (), {}, (), lambda: pytest.fail("strict fallback"))
+
+
+def test_attention_dispatch_validates_configuration_without_retry(config, monkeypatch):
+    from vllm_fl.platform import PlatformFL
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    attention_manager(monkeypatch, lambda **kw:
+                      "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend")
+    set_global_policy(SelectionPolicy.from_dict(
+        strict=False, reference_exclude="attention",
+        per_op_order={"attention_backend": ["flagos", "vendor"]},
+    ))
+    with pytest.raises(ValueError, match="MLA not supported"):
+        PlatformFL.get_attn_backend_cls(
+            None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None, use_mla=True),
+        )
+    assert get_records()[-1]["source"] == "user_override_error"
+
+
+def test_attention_dispatch_runtime_error_is_not_retried(config, monkeypatch):
+    calls = []
+    def fail(**kwargs):
+        calls.append(1)
+        raise RuntimeError("chosen attention failed")
+    manager = attention_manager(monkeypatch, fail)
+    set_global_policy(SelectionPolicy.from_dict(
+        strict=False, reference_exclude="attention",
+        per_op_order={"attention_backend": ["flagos", "vendor"]},
+    ))
+    with pytest.raises(RuntimeError, match="chosen attention failed"):
+        manager.call("attention_backend")
+    assert calls == [1]
+    assert get_records()[-1]["source"] == "user_override_error"
+
+
+def test_attention_dispatch_cannot_reenter_torch_reference(config, monkeypatch):
+    from vllm_fl.platform import PlatformFL
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm_fl.reference.attention import PATH
+    attention_manager(monkeypatch, lambda **kw: PATH)
+    set_global_policy(SelectionPolicy.from_dict(
+        strict=True, reference_exclude="attention",
+        per_op_order={"attention_backend": ["flagos"]},
+    ))
+    with pytest.raises(ReferenceUnavailable, match="cannot re-enter"):
+        PlatformFL.get_attn_backend_cls(
+            None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
+        )
+
+
+def test_attention_remains_torch_until_explicitly_excluded(config, monkeypatch):
+    from vllm_fl.platform import PlatformFL
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm_fl.reference.attention import PATH
+    attention_manager(monkeypatch, lambda **kw: pytest.fail("optimized attention selected"))
+    set_global_policy(SelectionPolicy.from_dict(
+        strict=True, per_op_order={"attention_backend": ["flagos"]},
+    ))
+    assert PlatformFL.get_attn_backend_cls(
+        None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
+    ) == PATH
+    assert get_records()[-1]["source"] == "plugin.torch"
 
 
 def test_route_report_distinguishes_user_selection_from_missing_reference(monkeypatch, tmp_path):

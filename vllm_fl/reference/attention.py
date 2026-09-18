@@ -202,36 +202,69 @@ def backend_candidate():
     return Candidate("plugin.torch", PATH, select, supports)
 
 
+def _validate_optimized_backend(path, config):
+    """Use the installed backend's capability checks on every device family."""
+    from vllm.platforms import current_platform
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+
+    backend = resolve_obj_by_qualname(path)
+    if not isinstance(backend, type) or not issubclass(backend, AttentionBackend):
+        raise ReferenceUnavailable(f"Not a vLLM AttentionBackend: {path}")
+    if issubclass(backend, TorchAttentionBackend):
+        raise ReferenceUnavailable("Excluded attention cannot re-enter TorchAttentionBackend")
+    invalid = backend.validate_configuration(
+        device_capability=current_platform.get_device_capability(), **config._asdict(),
+    )
+    if invalid:
+        raise ValueError(f"Selected backend {path} is not valid for this configuration: {invalid}")
+    return path
+
+
+def _select_optimized_backend(config, fallback, selected_backend, num_heads, reason):
+    from vllm.platforms import current_platform
+    from vllm_fl.dispatch.policy import get_policy
+
+    policy = get_policy()
+    order = policy.get_per_op_order("attention_backend")
+    # An explicit dispatch choice is independent of the device family. In
+    # particular, Hygon registers vLLM Triton under default.flagos, not vendor.
+    if selected_backend is None and (order is not None or not current_platform.is_cuda()):
+        path = fallback()
+    else:
+        vendor = getattr(current_platform, "vendor_name", current_platform.device_name)
+        vendor = {"nvidia": "cuda", "mthreads": "musa"}.get(vendor, vendor)
+        label = "CUDA" if current_platform.is_cuda() else vendor
+        if not policy.is_vendor_allowed(vendor):
+            raise ReferenceUnavailable(f"{label} attention is denied by dispatch policy")
+        if order is not None and not any(
+            token in {"vendor", f"vendor:{vendor}", f"impl:vendor.{vendor}"} for token in order
+        ):
+            raise ReferenceUnavailable(
+                f"attention_backend policy does not permit the {label} vendor; "
+                "choose --attention-backend or an FL per-op backend order, not conflicting selectors"
+            )
+        if current_platform.is_cuda():
+            from vllm.platforms.cuda import CudaPlatform
+            path = CudaPlatform.get_attn_backend_cls(selected_backend, config, num_heads)
+            if not path.startswith("vllm."):
+                raise ReferenceUnavailable(f"Expected an upstream vLLM attention backend, got {path}")
+        else:
+            # Respect vendor registrations in vLLM's backend registry; there is
+            # no recursive call to PlatformFL's own backend selector here.
+            path = selected_backend.get_path()
+    path = _validate_optimized_backend(path, config)
+    record_route("attention_backend", "user_override", path, reason)
+    return path
+
+
 def select_backend(config, fallback, selected_backend=None, num_heads=None):
     reason = selection_reason("attention_backend")
     if reason is not None:
-        from vllm.platforms import current_platform
-        from vllm_fl.dispatch.policy import get_policy
-        policy = get_policy()
-        if current_platform.is_cuda():
-            if not policy.is_vendor_allowed("cuda"):
-                raise ReferenceUnavailable("CUDA attention is denied by dispatch policy")
-            order = policy.get_per_op_order("attention_backend")
-            if order is not None and not any(
-                token in {"vendor", "vendor:cuda", "impl:vendor.cuda"} for token in order
-            ):
-                raise ReferenceUnavailable("attention_backend policy does not permit the CUDA vendor")
-            from vllm.platforms.cuda import CudaPlatform
-            def select_original():
-                path = CudaPlatform.get_attn_backend_cls(selected_backend, config, num_heads)
-                # Registered overrides must not turn an explicit vLLM selection
-                # into a FlagGems backend (or back into this torch backend).
-                if not path.startswith("vllm."):
-                    raise ReferenceUnavailable(f"Expected an upstream vLLM attention backend, got {path}")
-                record_route("attention_backend", "user_override", path, reason)
-                return path
-        else:
-            if selected_backend is not None:
-                raise ReferenceUnavailable("Explicit selective attention backend is validated on CUDA only")
-            select_original = fallback
-        return run_user_override("attention_backend", select_original,
-                                 "vllm.platforms.cuda.CudaPlatform.get_attn_backend_cls"
-                                 if current_platform.is_cuda() else "vendor attention selector", reason)
+        return run_user_override(
+            "attention_backend",
+            lambda: _select_optimized_backend(config, fallback, selected_backend, num_heads, reason),
+            "explicit attention selector", reason,
+        )
     if selected_backend is not None and selected_backend.name != "CUSTOM":
         raise ValueError("An explicit optimized attention backend conflicts with reference attention; "
                          "set VLLM_FL_REFERENCE_EXCLUDE=attention to use it")
