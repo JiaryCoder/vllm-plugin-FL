@@ -6,6 +6,9 @@
 在 vLLM 0.24.0 的第一、二阶段 reference 路由上增加按算子选择功能。
 可保持其他算子严格 reference，单独让 Attention 使用 vLLM Triton；也可只对指定算子启用 reference。
 
+**默认 Attention 为 `TRITON_ATTN`，其余已接管复合算子仍按 reference 路由。**
+需要纯 Torch Attention 时显式设置 `VLLM_FL_REFERENCE_ATTENTION_BACKEND=TORCH`。
+
 ## 配置
 
 仍需设置 `VLLM_FL_REFERENCE_MODE=1`，并在模型构建前配置：
@@ -14,11 +17,15 @@
 | --- | --- | --- |
 | `VLLM_FL_REFERENCE_INCLUDE` | `reference_include` | 只让这些算子走 reference；未设置或 `all` 表示全部入口 |
 | `VLLM_FL_REFERENCE_EXCLUDE` | `reference_exclude` | 将这些算子排除出 reference；默认空 |
+| `VLLM_FL_REFERENCE_ATTENTION_BACKEND` | — | 默认 `TRITON_ATTN`；`TORCH` 为纯 Torch；`AUTO` 为原平台选择；也可填已注册的 vLLM backend 名称 |
 
 环境变量使用逗号分隔，YAML 支持列表或逗号分隔字符串。显式空 INCLUDE 表示不选任何入口。
 EXCLUDE 优先于 INCLUDE；有效 `VLLM_FL_CONFIG` YAML 完全覆盖相应环境变量。
 名称拼写错误或非法类型立即报错。配置对象 `SelectionPolicy` 和 policy context 同样保留这两个字段。
 设置 INCLUDE/EXCLUDE 不会自行开启 reference 模式。
+Attention 后端设置独立于 YAML 的 include/exclude。`TORCH` 不会覆盖显式的 Attention 排除项；
+要恢复纯 Torch，请同时清除 Attention 的排除项，并确保 INCLUDE 包含 Attention。
+显式 CLI backend、Attention per-op order 优先于环境变量的优化后端设置；相互冲突的 CLI/per-op 组合会报错。
 
 被选中的入口仍执行：审查过的 vLLM torch → 插件 torch → 严格报错 / 非严格回退。
 被排除的入口主动使用保存的原平台实现，不受 reference 的缺失检查影响；执行失败直接抛出，不重试。
@@ -67,8 +74,9 @@ env -u VLLM_FL_CONFIG -u VLLM_FL_PER_OP -u VLLM_FL_REFERENCE_INCLUDE \
 CUDA 上 Attention 调用 vLLM 的 CUDA backend selector；其他平台通过已安装 vLLM 的 backend registry
 解析显式选择，并保留厂商注册的 backend。两种路径均调用实际 backend 的 `validate_configuration`，
 检查 dtype、head size、KV cache、MLA、设备能力等配置。
-不支持指定后端时明确失败，不替换成另一种 Attention。指定 `--attention-backend` 时必须把 Attention 排除出 reference，
-避免显式参数被静默忽略。不指定该参数则由 vLLM 在 CUDA 上自动选择。
+不支持指定后端时明确失败，不替换成另一种 Attention。默认设置下无需排除 Attention 或额外传 CLI 参数。
+如果设置了 `TORCH`，不能同时传优化后端 CLI 参数而不排除 Attention，避免矛盾配置被静默忽略。
+`AUTO` 且没有 CLI/per-op 选择时，由原平台选择 backend。
 显式选择不再限制为 NVIDIA。实际可用的 backend 仍由当前镜像的实现、依赖和硬件决定；
 不能据此认为所有平台都支持 FlashAttention、FlashInfer 或 Triton。
 
@@ -81,10 +89,10 @@ export USE_FLAGGEMS=0
 export VLLM_FL_REFERENCE_MODE=1
 export VLLM_FL_PREFER=vendor
 export VLLM_FL_STRICT=1
-export VLLM_FL_REFERENCE_EXCLUDE=attention
-unset VLLM_FL_CONFIG VLLM_FL_OP_CONFIG VLLM_FL_PER_OP VLLM_FL_REFERENCE_INCLUDE
-# 在原有 vllm serve 命令后增加：
-# --attention-backend TRITON_ATTN
+export VLLM_FL_REFERENCE_ATTENTION_BACKEND=TRITON_ATTN  # 默认值，可省略
+unset VLLM_FL_CONFIG VLLM_FL_OP_CONFIG VLLM_FL_PER_OP
+unset VLLM_FL_REFERENCE_INCLUDE VLLM_FL_REFERENCE_EXCLUDE
+# 接原有 vllm serve 命令即可，不需要额外的 Attention 参数。
 ```
 
 也可以使用 FL 的 per-op 选择（此方式不再同时传 `--attention-backend`）：
@@ -98,8 +106,9 @@ export VLLM_FL_USE_FLAGGEMS_ATTN=0
 
 两种选择都会记录实际 backend 类和 `user_override`。显式选择执行失败或能力校验失败时直接报错，
 即使 `VLLM_FL_STRICT=0` 也不在执行后自动重试另一种 Attention。
-恢复纯 Torch Attention 时，清除 Attention 的排除项并删除 `--attention-backend`；
-保持默认未设置 INCLUDE/EXCLUDE 即可让 Attention 与其余已接管算子一起走 reference。
+恢复纯 Torch Attention 时，设置 `VLLM_FL_REFERENCE_ATTENTION_BACKEND=TORCH`，清除 Attention 的排除项，
+确保 INCLUDE 包含 Attention，并删除 `--attention-backend`。其余复合算子的选择和严格模式不受影响。
+默认 Triton 不可用时会明确报错；可设置 `TORCH`，或选择当前平台安装且支持的其他 backend。
 
 Attention 在 KV cache 分配之前选定；MoE/W8A8 的选择也涉及权重装载和布局。
 **所有选择配置在启动时确定，修改后要重启整个服务，不能在已加载模型中热切换。**
@@ -158,7 +167,7 @@ MoE 权重装载与完整专家计算属于同一个选择单元，W8A8 Linear �
 - `vllm.native` / `plugin.torch`：实际 reference 候选。
 - `vllm.native.dynamic`：动态发现的 vLLM native 接口，见动态发现文档中的检查边界。
 - `reference.setup`：reference 所需的布局等初始化约定。
-- `user_override`：主动排除，记录实际原函数/provider/Attention 类及选择原因。
+- `user_override`：主动排除或配置的优化 Attention（包括默认 Triton），记录实际函数/provider/backend 及原因。
 - `user_override_error`：主动选择的实现执行失败，没有自动重试。
 - `reference.mixed`：某个 reference 父调用内实际发生了显式优化子调用，不能将父调用整体视为纯 torch。
 - `optimized_fallback`：reference 不可用时的非严格回退，与主动排除分开。

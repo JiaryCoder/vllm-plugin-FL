@@ -27,6 +27,7 @@ Environment Variables:
     VLLM_FL_REFERENCE_MODE: Enable audited torch reference routing
     VLLM_FL_REFERENCE_INCLUDE: Comma-separated reference operator/group allowlist
     VLLM_FL_REFERENCE_EXCLUDE: Comma-separated reference operator/group exclusions
+    VLLM_FL_REFERENCE_ATTENTION_BACKEND: TRITON_ATTN (default), TORCH, AUTO, or a vLLM backend name
     VLLM_FL_PER_OP: Per-operator order (format: op1=a|b|c;op2=x|y)
     VLLM_FL_PLUGIN_MODULES: Comma-separated list of plugin modules to load
     VLLM_FL_LOG_LEVEL: Log level for dispatch module (DEBUG, INFO, WARNING, ERROR)

@@ -14,7 +14,7 @@ from .engine import (
     Candidate, ReferenceUnavailable, reference_enabled, run_reference, tensor_support,
     record_route, run_user_override,
 )
-from .selection import selection_reason
+from .selection import attention_backend_preference, selection_reason
 
 
 @dataclass
@@ -202,21 +202,62 @@ def backend_candidate():
     return Candidate("plugin.torch", PATH, select, supports)
 
 
-def _validate_optimized_backend(path, config):
-    """Use the installed backend's capability checks on every device family."""
-    from vllm.platforms import current_platform
+def _optimized_backend_class(path):
     from vllm.utils.import_utils import resolve_obj_by_qualname
-
     backend = resolve_obj_by_qualname(path)
     if not isinstance(backend, type) or not issubclass(backend, AttentionBackend):
         raise ReferenceUnavailable(f"Not a vLLM AttentionBackend: {path}")
     if issubclass(backend, TorchAttentionBackend):
         raise ReferenceUnavailable("Excluded attention cannot re-enter TorchAttentionBackend")
+    return backend
+
+
+def _validate_optimized_backend(path, config):
+    """Use the installed backend's capability checks on every device family."""
+    from vllm.platforms import current_platform
+    backend = _optimized_backend_class(path)
     invalid = backend.validate_configuration(
         device_capability=current_platform.get_device_capability(), **config._asdict(),
     )
     if invalid:
         raise ValueError(f"Selected backend {path} is not valid for this configuration: {invalid}")
+    return path
+
+
+def _configured_backend():
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    preference = attention_backend_preference()
+    return None if preference in {"TORCH", "AUTO"} else AttentionBackendEnum[preference]
+
+
+def _check_backend_policy(policy, order):
+    from vllm.platforms import current_platform
+    vendor = getattr(current_platform, "vendor_name", current_platform.device_name)
+    vendor = {"nvidia": "cuda", "mthreads": "musa"}.get(vendor, vendor)
+    label = "CUDA" if current_platform.is_cuda() else vendor
+    if not policy.is_vendor_allowed(vendor):
+        raise ReferenceUnavailable(f"{label} attention is denied by dispatch policy")
+    if order is not None and not any(
+        token in {"vendor", f"vendor:{vendor}", f"impl:vendor.{vendor}"} for token in order
+    ):
+        raise ReferenceUnavailable(
+            f"attention_backend policy does not permit the {label} vendor; "
+            "choose --attention-backend or an FL per-op backend order, not conflicting selectors"
+        )
+
+
+def configured_dispatch_backend(use_mla=False, use_sparse=False):
+    """Keep direct FL selector calls consistent with the vLLM platform entry."""
+    from vllm_fl.dispatch.policy import get_policy
+    backend = _configured_backend()
+    if backend is None:
+        return None
+    _check_backend_policy(get_policy(), None)
+    path = backend.get_path()
+    cls = _optimized_backend_class(path)
+    if cls.is_mla() != use_mla or cls.is_sparse() != use_sparse:
+        raise ValueError(f"Selected backend {path} is not valid for use_mla={use_mla}, use_sparse={use_sparse}")
+    record_route("attention_backend", "user_override", path)
     return path
 
 
@@ -226,23 +267,15 @@ def _select_optimized_backend(config, fallback, selected_backend, num_heads, rea
 
     policy = get_policy()
     order = policy.get_per_op_order("attention_backend")
+    # CLI and per-op selections take precedence over the reference default.
+    if selected_backend is None and order is None:
+        selected_backend = _configured_backend()
     # An explicit dispatch choice is independent of the device family. In
     # particular, Hygon registers vLLM Triton under default.flagos, not vendor.
     if selected_backend is None and (order is not None or not current_platform.is_cuda()):
         path = fallback()
     else:
-        vendor = getattr(current_platform, "vendor_name", current_platform.device_name)
-        vendor = {"nvidia": "cuda", "mthreads": "musa"}.get(vendor, vendor)
-        label = "CUDA" if current_platform.is_cuda() else vendor
-        if not policy.is_vendor_allowed(vendor):
-            raise ReferenceUnavailable(f"{label} attention is denied by dispatch policy")
-        if order is not None and not any(
-            token in {"vendor", f"vendor:{vendor}", f"impl:vendor.{vendor}"} for token in order
-        ):
-            raise ReferenceUnavailable(
-                f"attention_backend policy does not permit the {label} vendor; "
-                "choose --attention-backend or an FL per-op backend order, not conflicting selectors"
-            )
+        _check_backend_policy(policy, order)
         if current_platform.is_cuda():
             from vllm.platforms.cuda import CudaPlatform
             path = CudaPlatform.get_attn_backend_cls(selected_backend, config, num_heads)

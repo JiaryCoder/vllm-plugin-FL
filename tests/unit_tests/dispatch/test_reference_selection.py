@@ -29,6 +29,7 @@ def environment(monkeypatch):
                  "VLLM_FL_REFERENCE_REPORT_DIR", "VLLM_FL_PER_OP"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("VLLM_FL_REFERENCE_MODE", "1")
+    monkeypatch.setenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND", "TORCH")
     monkeypatch.setenv("VLLM_FL_PREFER", "vendor")
     monkeypatch.setenv("VLLM_FL_STRICT", "1")
     reset_global_policy()
@@ -404,6 +405,63 @@ def test_attention_remains_torch_until_explicitly_excluded(config, monkeypatch):
         None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
     ) == PATH
     assert get_records()[-1]["source"] == "plugin.torch"
+
+
+def test_reference_defaults_to_triton_without_exclusion_or_cli(config, monkeypatch):
+    from vllm_fl.platform import PlatformFL
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    monkeypatch.delenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND")
+    assert selection_reason("attention")
+    assert selection_reason("rms_norm") is None
+    path = PlatformFL.get_attn_backend_cls(
+        None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
+    )
+    assert path == "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+    assert get_records()[-1]["source"] == "user_override"
+    with pytest.raises(ReferenceUnavailable):
+        run_reference("unreviewed", (), {}, (), lambda: pytest.fail("strict fallback"))
+
+
+def test_default_attention_direct_dispatch_matches_platform(config, monkeypatch):
+    monkeypatch.delenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND")
+    manager = attention_manager(monkeypatch, lambda **kw: pytest.fail("dispatch default leaked"))
+    assert manager.call("attention_backend", use_mla=False, use_sparse=False) == (
+        "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+    )
+    assert get_records()[-1]["source"] == "user_override"
+
+
+def test_default_triton_never_falls_back_when_incompatible(config, monkeypatch):
+    from vllm_fl.platform import PlatformFL
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    monkeypatch.delenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND")
+    set_global_policy(SelectionPolicy(strict=False))
+    with pytest.raises(ValueError, match="MLA not supported"):
+        PlatformFL.get_attn_backend_cls(
+            None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None, use_mla=True),
+        )
+    assert get_records()[-1]["source"] == "user_override_error"
+
+
+@pytest.mark.parametrize("value", ["tritno_attn", "", "reference"])
+def test_invalid_attention_setting_fails_before_model_loading(monkeypatch, value):
+    monkeypatch.setenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND", value)
+    with pytest.raises(ValueError, match="VLLM_FL_REFERENCE_ATTENTION_BACKEND"):
+        configure_reference(VllmConfig())
+
+
+def test_attention_backend_env_selects_registered_backend(config, monkeypatch):
+    from vllm_fl.platform import PlatformFL
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.attention.backends import registry
+    # A vendor/custom registration exercises selection without requiring that
+    # this machine also install every other accelerator's attention kernels.
+    path = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+    monkeypatch.setitem(registry._ATTN_OVERRIDES, registry.AttentionBackendEnum.CUSTOM, path)
+    monkeypatch.setenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND", "CUSTOM")
+    assert PlatformFL.get_attn_backend_cls(
+        None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
+    ) == path
 
 
 def test_route_report_distinguishes_user_selection_from_missing_reference(monkeypatch, tmp_path):

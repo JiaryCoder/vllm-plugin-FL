@@ -18,6 +18,7 @@ DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 @pytest.fixture(autouse=True)
 def setup_reference(monkeypatch):
     monkeypatch.setenv("VLLM_FL_REFERENCE_MODE", "1")
+    monkeypatch.setenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND", "TORCH")
     monkeypatch.delenv("VLLM_FL_REFERENCE_REPORT_DIR", raising=False)
     reset_default_manager()
     reset_global_policy()

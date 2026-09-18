@@ -24,6 +24,7 @@ from vllm_fl.reference.engine import optimized_fallback
 @pytest.fixture(autouse=True)
 def reference_mode(monkeypatch):
     monkeypatch.setenv("VLLM_FL_REFERENCE_MODE", "1")
+    monkeypatch.setenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND", "TORCH")
     monkeypatch.setenv("VLLM_FL_STRICT", "1")
     monkeypatch.delenv("VLLM_FL_CONFIG", raising=False)
     monkeypatch.delenv("VLLM_FL_REFERENCE_REPORT_DIR", raising=False)

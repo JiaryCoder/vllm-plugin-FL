@@ -20,6 +20,8 @@ def configure_reference(vllm_config):
     """Establish eager execution in every process receiving the vLLM config."""
     if not reference_requested():
         return
+    from .selection import attention_backend_preference
+    attention_backend_preference()  # Reject invalid settings before loading weights.
     import torch
     # Reference FP32 matrix products must not silently use TF32 mantissas.
     torch.set_float32_matmul_precision("highest")

@@ -6,12 +6,25 @@ not certify its implementation. Decisions apply to calls that reach a hook;
 inlined math inside a larger reference cannot be selected independently.
 """
 from functools import lru_cache
+import os
 import re
 
 
 _custom_groups = {}
 _CLASS_PATH = re.compile(r"vllm(?:\.[A-Za-z_][A-Za-z_0-9]*)+\Z")
 _IR_NAME = re.compile(r"[a-z_][a-z_0-9]*\Z")
+
+
+def attention_backend_preference():
+    """Reference uses optimized Triton attention unless Torch is requested."""
+    value = os.environ.get("VLLM_FL_REFERENCE_ATTENTION_BACKEND", "TRITON_ATTN").strip().upper()
+    if value not in {"TORCH", "AUTO"}:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        try:
+            AttentionBackendEnum[value]
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"Invalid VLLM_FL_REFERENCE_ATTENTION_BACKEND: {value!r}") from exc
+    return value
 
 
 def _module_groups(path):
@@ -184,10 +197,15 @@ def selection_reason(op):
         return f"excluded from reference: {name}"
     if policy.reference_include is not None and not matches(policy.reference_include):
         return f"outside reference include list: {name}"
+    if name == "attention_backend":
+        backend = attention_backend_preference()
+        if backend != "TORCH":
+            return f"configured optimized attention: {backend} (VLLM_FL_REFERENCE_ATTENTION_BACKEND)"
     return None
 
 
 def selection_active():
     from vllm_fl.dispatch.policy import get_policy
     policy = get_policy()
-    return policy.reference_include is not None or bool(policy.reference_exclude)
+    return (policy.reference_include is not None or bool(policy.reference_exclude)
+            or attention_backend_preference() != "TORCH")

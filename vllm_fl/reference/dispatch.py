@@ -14,6 +14,11 @@ def call_optimized(manager, op_name, args, kwargs):
     manager.ensure_initialized()
     policy = get_policy()
     order = policy.get_per_op_order(op_name)
+    if op_name == "attention_backend" and order is None and user_override_reason():
+        from .attention import configured_dispatch_backend
+        path = configured_dispatch_backend(*args, **kwargs)
+        if path is not None:
+            return path
     # Only an explicitly configured, excluded Attention selector may use a
     # non-vendor implementation. Keep the vendor-only rule for other operators
     # and for exclusions without a per-op choice.

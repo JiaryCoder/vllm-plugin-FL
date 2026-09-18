@@ -11,9 +11,12 @@ Reference 会关闭模型编译和 CUDA Graph，并阻止使用已激活的 Flag
 使用同一配置。用户无需额外配置 `CompilationConfig`；不能在已创建的算子实例上热切换。
 已有 MoE/GDN 等专用适配仍按各自协议运行，详见动态 native 文档。
 
+**本版默认标准 Attention 使用 vLLM Triton，其余已接管复合算子使用 reference。**
+`VLLM_FL_REFERENCE_ATTENTION_BACKEND=TORCH` 可切回纯 Torch Attention；该开关不改变其余算子的严格检查。
+
 ## 1. 开启 reference，保留 vLLM Triton Attention
 
-以下是 NVIDIA 上的选择方式：标准 Attention 使用 vLLM Triton，其余已支持入口使用 reference。
+以下启用默认配置：标准 Attention 使用 vLLM Triton，其余已支持入口使用 reference。
 `attention` 不包含 GDN；GDN 由 `gdn` 组独立控制。
 
 ```bash
@@ -25,7 +28,7 @@ export USE_FLAGGEMS=0
 export VLLM_FL_REFERENCE_MODE=1
 export VLLM_FL_STRICT=1
 export VLLM_FL_PREFER=vendor
-export VLLM_FL_REFERENCE_EXCLUDE=attention
+export VLLM_FL_REFERENCE_ATTENTION_BACKEND=TRITON_ATTN  # 默认值，可省略
 export VLLM_FL_REFERENCE_REPORT_DIR="/tmp/fl-reference-$(date +%Y%m%d-%H%M%S)"
 ```
 
@@ -36,7 +39,6 @@ export CUDA_VISIBLE_DEVICES=0
 
 vllm serve /data/models/Qwen3.6-35B-A3B \
   --served-model-name Qwen3.6-35B-A3B \
-  --attention-backend TRITON_ATTN \
   --tensor-parallel-size 1 \
   --dtype bfloat16 \
   --enforce-eager \
@@ -52,6 +54,8 @@ vllm serve /data/models/Qwen3.6-35B-A3B \
 ```
 
 模型路径、GPU、端口、并发和容量参数按实际环境调整；这些数值不是所有模型或设备的通用配置。
+上面的 GPU 环境变量为 NVIDIA 示例；海光使用 `HIP_VISIBLE_DEVICES`。
+Triton 必须在当前镜像和设备上可用，否则会明确报错，不自动更换后端。
 切换 reference 本身不要求缩短上下文或输出长度。请求的输出 token 上限由评测端另行设置，
 `--max-model-len` 约束输入与输出的总长度。
 
@@ -67,7 +71,7 @@ vllm serve /data/models/Qwen3.6-35B-A3B \
 | 只让 MoE 走 reference | `moe` | unset |
 | 只让 GDN 走 reference | `gdn` | unset |
 | 同时选择归一化和 RoPE | `normalization,rope` | unset |
-| 所有已支持入口走 reference | unset | unset |
+| 所有已支持复合算子走 reference，Attention 默认 Triton | unset | unset |
 
 例如只让归一化走 reference：
 
@@ -88,11 +92,14 @@ unset VLLM_FL_REFERENCE_EXCLUDE
 
 ```bash
 unset VLLM_FL_REFERENCE_INCLUDE VLLM_FL_REFERENCE_EXCLUDE
+export VLLM_FL_REFERENCE_ATTENTION_BACKEND=TORCH
 # 从 vllm serve 命令中移除 --attention-backend TRITON_ATTN。
 ```
 
 Attention 被选为 reference 时，不能同时指定优化 Attention 后端。
 Attention 的布局在 KV cache 分配前确定；MoE/W8A8 的选择也会影响权重装载。
+其他优化后端可使用 `VLLM_FL_REFERENCE_ATTENTION_BACKEND=FLASH_ATTN` 等已注册名称；
+`AUTO` 表示交给原平台选择。显式 CLI/per-op 选择的优先级更高，详见选择性 reference 文档。
 
 完整名称、别名、组和选择粒度见 [reference-selection.md](reference-selection.md)。
 复合算子中的内联计算不会自动成为可单独切换的入口。
@@ -133,7 +140,7 @@ tail -n 20 "$VLLM_FL_REFERENCE_REPORT_DIR"/reference-*.jsonl
 | `vllm.native.dynamic` | 动态发现的 vLLM native 接口，不代表完整调用图已经审核 |
 | `plugin.torch` | 使用插件补充的 PyTorch 候选 |
 | `reference.setup` | 装载或布局初始化事件，不代表执行某个计算 kernel |
-| `user_override` | 按 INCLUDE/EXCLUDE 主动使用原实现 |
+| `user_override` | 按配置使用优化实现，包含默认 Triton Attention |
 | `reference.mixed` | reference 父调用包含显式优化子调用 |
 | `optimized_fallback` | 非严格模式下使用优化实现回退 |
 | `unavailable` / `error` | 无可用 reference / 实现执行出错 |
