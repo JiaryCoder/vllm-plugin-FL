@@ -14,7 +14,7 @@ def call_optimized(manager, op_name, args, kwargs):
     manager.ensure_initialized()
     policy = get_policy()
     order = policy.get_per_op_order(op_name)
-    if op_name == "attention_backend" and order is None and user_override_reason():
+    if op_name == "attention_backend" and user_override_reason():
         from .attention import configured_dispatch_backend
         path = configured_dispatch_backend(*args, **kwargs)
         if path is not None:

@@ -99,7 +99,8 @@ export VLLM_FL_REFERENCE_ATTENTION_BACKEND=TORCH
 Attention 被选为 reference 时，不能同时指定优化 Attention 后端。
 Attention 的布局在 KV cache 分配前确定；MoE/W8A8 的选择也会影响权重装载。
 其他优化后端可使用 `VLLM_FL_REFERENCE_ATTENTION_BACKEND=FLASH_ATTN` 等已注册名称；
-`AUTO` 表示交给原平台选择。显式 CLI/per-op 选择的优先级更高，详见选择性 reference 文档。
+`AUTO` 表示交给原平台/per-op policy 选择；CLI 优先于本环境变量，本环境变量优先于厂商预置的
+per-op policy，详见选择性 reference 文档。
 
 完整名称、别名、组和选择粒度见 [reference-selection.md](reference-selection.md)。
 复合算子中的内联计算不会自动成为可单独切换的入口。

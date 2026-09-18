@@ -153,5 +153,13 @@ def register_builtins(registry) -> None:
         ),
     ]
 
-    filtered = [impl for impl in impls if use_flaggems_op(impl.op_name)]
+    from vllm_fl.reference.engine import reference_requested
+    from vllm_fl.reference.selection import selection_reason
+    selectable_attention = (
+        reference_requested() and selection_reason("attention_backend") is not None
+    )
+    # Reference still disables all FlagGems ATen/composite registrations. Keep
+    # just the Attention selector available for an explicit AUTO/per-op choice.
+    filtered = [impl for impl in impls if use_flaggems_op(impl.op_name)
+                or (selectable_attention and impl.op_name == "attention_backend")]
     registry.register_many(filtered)

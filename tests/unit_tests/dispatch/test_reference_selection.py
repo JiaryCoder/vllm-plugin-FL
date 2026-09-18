@@ -264,16 +264,17 @@ def test_attention_override_obeys_vendor_restrictions(config):
                                       AttentionSelectorConfig(128, torch.bfloat16, "auto", None))
 
 
-def test_explicit_attention_and_conflicting_dispatch_order_fail(config):
+def test_explicit_attention_overrides_dispatch_order(config):
     from vllm_fl.platform import PlatformFL
     from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     set_global_policy(SelectionPolicy.from_dict(
         reference_exclude="attention", per_op_order={"attention_backend": ["flagos"]},
     ))
-    with pytest.raises(ReferenceUnavailable, match="conflicting selectors"):
-        PlatformFL.get_attn_backend_cls(AttentionBackendEnum.TRITON_ATTN,
-                                      AttentionSelectorConfig(128, torch.bfloat16, "auto", None))
+    assert PlatformFL.get_attn_backend_cls(
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
+    ) == "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
 
 
 def test_attention_uses_actual_vllm_triton_backend(config):
@@ -420,6 +421,43 @@ def test_reference_defaults_to_triton_without_exclusion_or_cli(config, monkeypat
     assert get_records()[-1]["source"] == "user_override"
     with pytest.raises(ReferenceUnavailable):
         run_reference("unreviewed", (), {}, (), lambda: pytest.fail("strict fallback"))
+
+
+def test_default_triton_overrides_real_platform_per_op_defaults(config, monkeypatch):
+    from vllm_fl.platform import PlatformFL
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    monkeypatch.delenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND")
+    monkeypatch.setenv("USE_FLAGGEMS", "0")
+    # Use the real policy loader and registry, as spawned model workers do.
+    set_global_policy(policy_from_env())
+    reset_default_manager()
+    path = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+    assert PlatformFL.get_attn_backend_cls(
+        None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
+    ) == path
+    assert call_op("attention_backend", use_mla=False, use_sparse=False) == path
+
+
+def test_auto_attention_registers_only_the_real_flagos_selector(config, monkeypatch):
+    from vllm_fl.platform import PlatformFL
+    from vllm_fl.dispatch.manager import get_default_manager
+    from vllm_fl.utils import use_flaggems
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    monkeypatch.setenv("VLLM_FL_REFERENCE_ATTENTION_BACKEND", "AUTO")
+    monkeypatch.setenv("USE_FLAGGEMS", "0")
+    monkeypatch.setenv("VLLM_FL_USE_FLAGGEMS_ATTN", "0")
+    set_global_policy(SelectionPolicy.from_dict(
+        strict=True, per_op_order={"attention_backend": ["flagos"]},
+    ))
+    reset_default_manager()
+    assert PlatformFL.get_attn_backend_cls(
+        None, AttentionSelectorConfig(128, torch.bfloat16, "auto", None),
+    ) == "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+    snapshot = get_default_manager().registry.snapshot()
+    defaults = {name for name, impls in snapshot.impls_by_op.items()
+                if any(impl.kind == BackendImplKind.DEFAULT for impl in impls)}
+    assert defaults == {"attention_backend"}
+    assert not use_flaggems()
 
 
 def test_default_attention_direct_dispatch_matches_platform(config, monkeypatch):

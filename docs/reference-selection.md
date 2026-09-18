@@ -25,7 +25,8 @@ EXCLUDE 优先于 INCLUDE；有效 `VLLM_FL_CONFIG` YAML 完全覆盖相应环�
 设置 INCLUDE/EXCLUDE 不会自行开启 reference 模式。
 Attention 后端设置独立于 YAML 的 include/exclude。`TORCH` 不会覆盖显式的 Attention 排除项；
 要恢复纯 Torch，请同时清除 Attention 的排除项，并确保 INCLUDE 包含 Attention。
-显式 CLI backend、Attention per-op order 优先于环境变量的优化后端设置；相互冲突的 CLI/per-op 组合会报错。
+优化后端的优先级为显式 CLI backend → 本环境变量（默认 Triton）→ `AUTO` 下的 per-op/platform policy。
+厂商 YAML 中预置的 `op_backends` 不会覆盖默认 Triton。要按 per-op 选择，请设置 `AUTO`。
 
 被选中的入口仍执行：审查过的 vLLM torch → 插件 torch → 严格报错 / 非严格回退。
 被排除的入口主动使用保存的原平台实现，不受 reference 的缺失检查影响；执行失败直接抛出，不重试。
@@ -36,7 +37,8 @@ Attention 后端设置独立于 YAML 的 include/exclude。`TORCH` 不会覆盖�
 Attention 是可显式配置的例外：同时排除 `attention` 并设置其 per-op 后端时，允许指定的非 reference
 候选，包括 `flagos`。这不放宽其他复合算子的 vendor 限制，也不启用 FlagGems ATen 替换。
 CustomOp/IR/函数入口回到其原平台方法或 provider，未必每个原方法都是融合 kernel，实际路径以记录为准。
-所有 reference 模式都会跳过 FlagGems OOT 算子/路由注册，也不启用 FlagGems ATen 替换。
+所有 reference 模式都会跳过 FlagGems OOT 算子注册，也不启用 FlagGems ATen 替换；
+优化 Attention 仅保留可选的 backend selector，不因此注册其他 FlagGems 复合算子。
 如果当前进程此前已启用 FlagGems ATen 替换，执行 reference 或主动排除入口都会拒绝，请重建进程。
 
 ## Attention 使用 vLLM Triton
@@ -99,6 +101,7 @@ unset VLLM_FL_REFERENCE_INCLUDE VLLM_FL_REFERENCE_EXCLUDE
 
 ```bash
 export VLLM_FL_REFERENCE_EXCLUDE=attention
+export VLLM_FL_REFERENCE_ATTENTION_BACKEND=AUTO
 export VLLM_FL_PER_OP='attention_backend=flagos'
 export VLLM_FL_USE_FLAGGEMS_ATTN=0
 # 当前 default.flagos 选择器在此配置下返回 vLLM 的 TritonAttentionBackend。

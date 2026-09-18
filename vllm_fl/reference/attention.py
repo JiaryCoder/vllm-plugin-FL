@@ -230,20 +230,13 @@ def _configured_backend():
     return None if preference in {"TORCH", "AUTO"} else AttentionBackendEnum[preference]
 
 
-def _check_backend_policy(policy, order):
+def _check_backend_policy(policy):
     from vllm.platforms import current_platform
     vendor = getattr(current_platform, "vendor_name", current_platform.device_name)
     vendor = {"nvidia": "cuda", "mthreads": "musa"}.get(vendor, vendor)
     label = "CUDA" if current_platform.is_cuda() else vendor
     if not policy.is_vendor_allowed(vendor):
         raise ReferenceUnavailable(f"{label} attention is denied by dispatch policy")
-    if order is not None and not any(
-        token in {"vendor", f"vendor:{vendor}", f"impl:vendor.{vendor}"} for token in order
-    ):
-        raise ReferenceUnavailable(
-            f"attention_backend policy does not permit the {label} vendor; "
-            "choose --attention-backend or an FL per-op backend order, not conflicting selectors"
-        )
 
 
 def configured_dispatch_backend(use_mla=False, use_sparse=False):
@@ -252,7 +245,7 @@ def configured_dispatch_backend(use_mla=False, use_sparse=False):
     backend = _configured_backend()
     if backend is None:
         return None
-    _check_backend_policy(get_policy(), None)
+    _check_backend_policy(get_policy())
     path = backend.get_path()
     cls = _optimized_backend_class(path)
     if cls.is_mla() != use_mla or cls.is_sparse() != use_sparse:
@@ -267,15 +260,19 @@ def _select_optimized_backend(config, fallback, selected_backend, num_heads, rea
 
     policy = get_policy()
     order = policy.get_per_op_order("attention_backend")
-    # CLI and per-op selections take precedence over the reference default.
-    if selected_backend is None and order is None:
-        selected_backend = _configured_backend()
+    # Platform YAMLs already contain per-op defaults. They must not override
+    # the reference Attention setting. AUTO opts into that dispatch policy;
+    # an explicit vLLM CLI backend takes precedence over the configured name.
+    configured = _configured_backend()
+    if selected_backend is not None or configured is not None:
+        selected_backend = selected_backend or configured
+        order = None
     # An explicit dispatch choice is independent of the device family. In
     # particular, Hygon registers vLLM Triton under default.flagos, not vendor.
     if selected_backend is None and (order is not None or not current_platform.is_cuda()):
         path = fallback()
     else:
-        _check_backend_policy(policy, order)
+        _check_backend_policy(policy)
         if current_platform.is_cuda():
             from vllm.platforms.cuda import CudaPlatform
             path = CudaPlatform.get_attn_backend_cls(selected_backend, config, num_heads)
